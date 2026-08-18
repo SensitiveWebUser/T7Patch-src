@@ -517,10 +517,6 @@ void UninstallHook()
                 wine_hook_installed = false;
             }
         }
-        else
-        {
-            old_windows_uninstallhook(kiuserexceptiondispatcher);
-        }
     }
 
     Protection::ExceptionHookInstalled = false;
