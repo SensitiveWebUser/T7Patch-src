@@ -118,6 +118,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
+      <AdditionalDependencies>$(SolutionDir)minhook\lib\libMinHook.x64.lib;$(SolutionDir)detours\detours.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -156,6 +157,9 @@
     <ClCompile Include="Hooks.cpp" />
     <ClCompile Include="offsets.cpp" />
     <ClCompile Include="Protection.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="T7Patch.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

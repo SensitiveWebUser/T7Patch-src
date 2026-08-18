@@ -1,0 +1,161 @@
+name: Build
+
+# Manual only. There is no test suite, so a green run on every push would only
+# ever mean "it compiled".
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: 'MSVC configuration'
+        type: choice
+        options: [Release, Debug]
+        default: Release
+      build_injector:
+        description: 'Also produce the Windows injector exe (needs redist/t7dwidm_protect.exe)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ inputs.configuration }} x64
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      # Needed by actions/attest-build-provenance.
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      # The project pins v145 (VS 2026). Detect what the runner actually has and fall
+      # back to v143, which also supports /std:c++20 and /permissive-.
+      - name: Select platform toolset
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+          if (-not $vsPath) { throw 'vswhere found no Visual Studio installation.' }
+          $toolsets = Get-ChildItem -Path (Join-Path $vsPath 'MSBuild\Microsoft\VC') -Directory -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.Parent.Name -eq 'PlatformToolsets' } |
+            Select-Object -ExpandProperty Name -Unique
+          Write-Host "Installed VC platform toolsets: $($toolsets -join ', ')"
+          $toolset = if ($toolsets -contains 'v145') { 'v145' }
+                     elseif ($toolsets -contains 'v143') { 'v143' }
+                     else { throw 'Neither v145 nor v143 toolset is installed on this runner.' }
+          Write-Host "Selected PlatformToolset: $toolset"
+          "PLATFORM_TOOLSET=$toolset" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Builds the vcxproj directly; the .slnx solution needs a newer MSBuild and holds
+      # only this project. SolutionDir is passed explicitly because the linker paths use
+      # it and it is only set when building through a solution. The trailing backslash
+      # matters - the paths concatenate straight onto it.
+      - name: Build
+        shell: pwsh
+        run: >
+          msbuild T7Patch.vcxproj -m -nologo -t:Rebuild
+          -p:Configuration=${{ inputs.configuration }}
+          -p:Platform=x64
+          -p:PlatformToolset=$env:PLATFORM_TOOLSET
+          "-p:SolutionDir=${{ github.workspace }}\"
+
+      # This DLL is the whole deliverable for a manual/dsound install on either platform:
+      # dsound.dll and t7patchloader.dll do not change between releases, so an existing
+      # install is updated by replacing this file alone.
+      #
+      # The lowercase name matters. t7patchloader.dll passes that exact string to
+      # LoadLibraryA, and on a case-sensitive Linux/Proton filesystem a T7Patch.dll would
+      # sit beside the existing t7patch.dll rather than replace it - the old build would
+      # keep loading. It cannot be renamed in place on Windows, where paths are
+      # case-insensitive and that is a copy onto itself, hence the separate directory.
+      - name: Stage t7patch.dll
+        shell: pwsh
+        run: |
+          $outDir = 'artifact'
+          $built  = Join-Path 'x64\${{ inputs.configuration }}' 'T7Patch.dll'
+          $pdb    = Join-Path 'x64\${{ inputs.configuration }}' 'T7Patch.pdb'
+          if (-not (Test-Path $built)) { throw "Expected output not found: $built" }
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+          Copy-Item $built (Join-Path $outDir 't7patch.dll') -Force
+          if (Test-Path $pdb) { Copy-Item $pdb (Join-Path $outDir 't7patch.pdb') -Force }
+          $dll  = Join-Path $outDir 't7patch.dll'
+          $hash = (Get-FileHash -Path $dll -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash *t7patch.dll" | Out-File -FilePath "$dll.sha256" -Encoding ascii
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value @(
+            "### t7patch.dll (${{ inputs.configuration }} x64)", "",
+            "Drop-in replacement for a manual/dsound install on Windows or Linux.", "",
+            "| Field | Value |", "| ----- | ----- |",
+            "| SHA-256 | ``$hash`` |",
+            "| Size | $((Get-Item $dll).Length) bytes |",
+            "| Toolset | $env:PLATFORM_TOOLSET |", "")
+
+      # The assembly is IL-only and not strong-name signed, so Mono.Cecil can replace the
+      # resource and rewrite the file with correct offsets. That imposes no size limit on
+      # the replacement and needs no source for the injector.
+      - name: Build Windows injector exe
+        if: inputs.build_injector
+        shell: pwsh
+        run: |
+          $exeName = 't7dwidm_protect.exe'
+          $resName = 't7dwidm_protect.t7patch.dll'
+          $base    = "redist/$exeName"
+          if (-not (Test-Path $base)) {
+            Write-Host "::warning::$base not present - skipping the injector build."
+            exit 0
+          }
+
+          $exePath = Join-Path 'artifact' $exeName
+          Copy-Item $base $exePath -Force
+          $exePath = (Resolve-Path $exePath).Path
+          $dllBytes = [System.IO.File]::ReadAllBytes((Resolve-Path 'artifact/t7patch.dll').Path)
+
+          nuget install Mono.Cecil -Version 0.11.5 -OutputDirectory packages -NonInteractive | Out-Null
+          $cecil = Get-ChildItem -Path 'packages' -Recurse -Filter 'Mono.Cecil.dll' |
+                   Where-Object { $_.FullName -match 'netstandard2\.0' } |
+                   Select-Object -First 1
+          if (-not $cecil) { throw 'Mono.Cecil netstandard2.0 build not found after restore.' }
+          Add-Type -Path $cecil.FullName
+
+          $asm = [Mono.Cecil.AssemblyDefinition]::ReadAssembly($exePath)
+          try {
+            $old = $asm.MainModule.Resources | Where-Object { $_.Name -eq $resName }
+            if (-not $old) { throw "Resource $resName not found in $exeName." }
+            Write-Host "Replacing $resName ($($old.GetResourceData().Length) -> $($dllBytes.Length) bytes)."
+            $attrs = $old.Attributes
+            [void]$asm.MainModule.Resources.Remove($old)
+            $asm.MainModule.Resources.Add(
+              (New-Object Mono.Cecil.EmbeddedResource($resName, $attrs, $dllBytes)))
+            $asm.Write($exePath + '.new')
+          } finally { $asm.Dispose() }
+          Move-Item ($exePath + '.new') $exePath -Force
+
+          $hash = (Get-FileHash -Path $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash *$exeName" | Out-File -FilePath "$exePath.sha256" -Encoding ascii
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value @(
+            "### $exeName", "",
+            "Drop-in replacement for a Windows injector install.", "",
+            "| Field | Value |", "| ----- | ----- |",
+            "| SHA-256 | ``$hash`` |",
+            "| Embedded t7patch.dll | $($dllBytes.Length) bytes |", "")
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: T7Patch-${{ inputs.configuration }}-x64
+          path: artifact/
+          if-no-files-found: error
+
+      # Binds the DLL digest to this repo, commit and run via Sigstore - the evidence
+      # antivirus vendors ask for when submitting a false-positive report.
+      - name: Attest build provenance
+        if: inputs.configuration == 'Release'
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: artifact/t7patch.dll
