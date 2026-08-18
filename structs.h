@@ -217,6 +217,23 @@ struct LobbyMsg
 	__int32 packageType;
 };
 
+// These layouts mirror the game's, and code elsewhere hardcodes the offsets: InspectLM reads
+// lobbyMsg + 0x38, and the inspectors memcpy_s exactly 0x44 bytes. Editing a field above would
+// silently corrupt packet parsing, so fail the build instead.
+static_assert(sizeof(msg_t) == 0x38, "msg_t layout changed; raw offsets elsewhere now disagree");
+static_assert(offsetof(msg_t, data) == 0x08, "msg_t::data offset is hardcoded as +8");
+static_assert(offsetof(msg_t, maxsize) == 0x18, "msg_t::maxsize offset changed");
+static_assert(offsetof(msg_t, cursize) == 0x1C, "msg_t::cursize offset is hardcoded as +0x1C");
+static_assert(offsetof(msg_t, readcount) == 0x24, "msg_t::readcount offset is hardcoded as +0x24");
+
+static_assert(offsetof(LobbyMsg, msg) == 0x00, "LobbyMsg must start with its msg_t");
+static_assert(offsetof(LobbyMsg, msgType) == 0x38, "LobbyMsg::msgType is hardcoded as lobbyMsg+0x38");
+// The inspectors memcpy_s exactly 0x44 bytes, which is where the last field ends, not sizeof
+// which rounds up to 0x48 for tail padding because msg_t's char* members make the struct 8-aligned.
+static_assert(offsetof(LobbyMsg, packageType) + sizeof(__int32) == 0x44,
+	"LobbyMsg payload extent is hardcoded in the inspectors' memcpy_s");
+static_assert(sizeof(LobbyMsg) == 0x48, "LobbyMsg is expected to carry 4 bytes of tail padding");
+
 struct bdSecurityID
 {
 	__int64 id;
