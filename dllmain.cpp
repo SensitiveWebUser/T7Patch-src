@@ -475,6 +475,7 @@ bool InstallHook(void* func)
         }
         else
         {
+        }
     }
 
     return false;
