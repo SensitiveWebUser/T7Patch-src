@@ -2747,5 +2747,4 @@ static uintptr_t crc_patch_3[] = {
 
 };
 
-
-extern void PatchChecksumComparisons_Precomputed();
+extern bool PatchChecksumComparisons_Precomputed();
