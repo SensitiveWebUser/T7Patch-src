@@ -3,14 +3,19 @@
 bool has_set_window_text = false;
 bool Protection::IsFriendsOnly = false;
 bool Protection::IsInjectorlessInstall = true;
+bool Protection::Installed = false;
+volatile bool Protection::Unloading = false;
+bool Protection::ExceptionHookInstalled = false;
+void* Protection::MainThreadHandle = nullptr;
+thread_local int Protection::InspectorDepth = 0;
 __int64 Protection::PrivatePassword[3] = { 0, 0 };
 char Protection::CustomName[16] = { 0 };
 std::unordered_map<BYTE, std::function<void(__int32* lobbyMsgTypePtr, __int64 lobbyMsg)>> Protection::handle_packet_callbacks;
 __int64 Protection::Old_lobbymsgprints = NULL;
 __int64 Protection::CachedRetnAddy = NULL;
 __int64 Protection::CachedXUID = NULL;
-tZwContinue Protection::ZwContinue = NULL;
-tI_stricmp Protection::I_stricmp = NULL;
+tZwContinue Protection::ZwContinue = reinterpret_cast<tZwContinue>(GetProcAddress(GetModuleHandleA("ntdll.dll"), "ZwContinue"));
+tI_stricmp Protection::I_stricmp = (tI_stricmp)PTR_I_stricmp;
 char* Protection::UILocalizeDefaultText = NULL;
 tLobbyMsgRW_PackageInt Protection::LobbyMsgRW_PackageInt = NULL;
 tLobbyMsgRW_PackageUChar Protection::LobbyMsgRW_PackageUChar = NULL;
@@ -180,7 +185,7 @@ EXPORT void SetFriendsOnly(bool isFriendsOnly)
 
 EXPORT void SetPlayerName(const char* name)
 {
-    if (strlen(name) > 15)
+    if (!name || strlen(name) > 15)
     {
         return;
     }
@@ -194,7 +199,7 @@ EXPORT void SetPlayerName(const char* name)
 
 EXPORT void SetNetworkPassword(const char* pass)
 {
-    if (strlen(pass) == 0 || !(*pass))
+    if (!pass || !(*pass))
     {
         Protection::SetNetworkPassword(0);
     }
@@ -253,18 +258,30 @@ const char* Protection::GetUsernamePtr(INT64 a)
 
 unsigned __int64 next_update_friendslist_time = 0;
 std::unordered_set<__int64> friends_set;
-bool Protection::IsFriendByXUIDUncached(__int64 xuid) // ok I say its "uncached" but thats because I don't want this running a billion times per second and I think it might hitch with huge friends lists.
+SRWLOCK friends_set_lock = SRWLOCK_INIT;
+bool Protection::IsFriendByXUIDUncached(__int64 xuid)
 {
     if (GetTickCount64() < next_update_friendslist_time || !(*(char*)OFF_s_runningUILevel)) // we will just not update the friends list in game because I really think this will hitch. STEAMAPI SUCKS
     {
-        return friends_set.find(xuid) != friends_set.end();
+        AcquireSRWLockShared(&friends_set_lock);
+        const bool found = friends_set.find(xuid) != friends_set.end();
+        ReleaseSRWLockShared(&friends_set_lock);
+        return found;
     }
 
     auto isteamfriends = *(__int64*)STEAMAPI_FRIENDS;
+    if (!isteamfriends)
+    {
+        AcquireSRWLockShared(&friends_set_lock);
+        const bool found = friends_set.find(xuid) != friends_set.end();
+        ReleaseSRWLockShared(&friends_set_lock);
+        return found;
+    }
+
     auto fn_GetFriendCount = *(__int64*)(*(__int64*)isteamfriends + 0x18);
     int num_friends = ((int(__fastcall*)(__int64, int))fn_GetFriendCount)(isteamfriends, 4);
 
-    friends_set.clear();
+    std::unordered_set<__int64> refreshed;
 
     // GetFriendByIndex must have been different in the api they used back then
     auto fn_GetFriendByIndex = *(__int64*)(*(__int64*)isteamfriends + 0x20);
@@ -274,20 +291,59 @@ bool Protection::IsFriendByXUIDUncached(__int64 xuid) // ok I say its "uncached"
         ((void(__fastcall*)(__int64, __int64&, int, int))fn_GetFriendByIndex)(isteamfriends, out_friend, i, 4);
         if (out_friend)
         {
-            friends_set.insert(out_friend);
+            refreshed.insert(out_friend);
         }
     }
 
     next_update_friendslist_time = GetTickCount64() + 30 * 1000; // once every 30 seconds
-    return friends_set.find(xuid) != friends_set.end();
+
+    AcquireSRWLockExclusive(&friends_set_lock);
+    friends_set = std::move(refreshed);
+    const bool found = friends_set.find(xuid) != friends_set.end();
+    ReleaseSRWLockExclusive(&friends_set_lock);
+    return found;
 }
 
-unsigned __int64 check_dlc_next = 0;
 std::unordered_map<INT32, bool> dlcContent;
+SRWLOCK dlc_cache_lock = SRWLOCK_INIT;
 // BIsDlcInstalled
 // 0x30 has similar signature and seems to be used the same way
 // 0x18 isvacbanned
 // 0xB0 GetDlcDownloadProgress
+
+static bool CachedOwnsContent(std::unordered_map<INT32, bool>& cache, INT64 _interface, INT32 itemid, INT32 vtIndex)
+{
+    AcquireSRWLockExclusive(&dlc_cache_lock);
+
+    // No periodic invalidation, deliberately: re-querying Steam can return a different answer
+    // mid-session, which makes owned content vanish from the menus. Cache for the process lifetime.
+    auto entry = cache.find(itemid);
+    if (entry != cache.end())
+    {
+        const bool cached = entry->second;
+        ReleaseSRWLockExclusive(&dlc_cache_lock);
+        return cached;
+    }
+
+    ReleaseSRWLockExclusive(&dlc_cache_lock);
+
+    // Called outside the lock: this reaches into Steam and must not hold a lock the packet paths
+    // also take.
+    auto original = Protection::GetOriginalSteamPtr(STEAMAPI_INTERFACE, vtIndex);
+    if (!original)
+    {
+        // Steam was not up when install() ran, so this slot was never swapped. Not cached: caching
+        // a "not owned" here would take DLC content away for the rest of the session.
+        return false;
+    }
+
+    const bool owns = ((bool(__fastcall*)(INT64, INT64))original)(_interface, itemid);
+
+    AcquireSRWLockExclusive(&dlc_cache_lock);
+    cache[itemid] = owns;
+    ReleaseSRWLockExclusive(&dlc_cache_lock);
+    return owns;
+}
 
 bool Protection::GetOwnsContent(INT64 _interface, INT32 itemid)
 {
@@ -296,12 +352,7 @@ bool Protection::GetOwnsContent(INT64 _interface, INT32 itemid)
         return true;
     }
 
-    if (dlcContent.find(itemid) == dlcContent.end())
-    {
-        check_dlc_next = GetTickCount64() + (60 * 10 * 1000);
-        dlcContent[itemid] = ((bool(__fastcall*)(INT64, INT64))GetOriginalSteamPtr(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT))(_interface, itemid);
-    }
-    return dlcContent[itemid];
+    return CachedOwnsContent(dlcContent, _interface, itemid, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT);
 }
 
 bool Protection::GetOwnsContent2(INT64 _interface, INT32 itemid)
@@ -311,12 +362,10 @@ bool Protection::GetOwnsContent2(INT64 _interface, INT32 itemid)
         return true;
     }
 
-    if (dlcContent.find(itemid) == dlcContent.end())
-    {
-        check_dlc_next = GetTickCount64() + (60 * 10 * 1000);
-        dlcContent[itemid] = ((bool(__fastcall*)(INT64, INT64))GetOriginalSteamPtr(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT2))(_interface, itemid);
-    }
-    return dlcContent[itemid];
+    // DO NOT split this cache. Sharing dlcContent with GetOwnsContent looks like a copy-paste bug,
+    // but giving this function its own map makes the CHECK_OWNS_CONTENT2 call actually happen, it
+    // answers "not owned", and Campaign and Multiplayer grey out with a crash entering Zombies.
+    return CachedOwnsContent(dlcContent, _interface, itemid, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT2);
 }
 
 bool Protection::IsVacBanned(INT64 a)
@@ -380,10 +429,10 @@ __int32 Protection::GetLobbyChatEntry(INT64 api, INT64 csteamidlobby, INT64 chat
     const auto session = Protection::LobbySession_GetSession(sessionType);
     bool found_xuid = false;
 
-    for (int i = 0; i < 18; i++)
+    for (int i = 0; session && i < 18; i++)
     {
         const auto client = Protection::LobbySession_GetClientByClientNum(session, i);
-        if (client->activeClient && client->activeClient->fixedClientInfo.xuid == steamid)
+        if (client && client->activeClient && client->activeClient->fixedClientInfo.xuid == steamid)
         {
             found_xuid = true;
         }
@@ -398,7 +447,17 @@ __int32 Protection::GetLobbyChatEntry(INT64 api, INT64 csteamidlobby, INT64 chat
     {
         char* msg = (char*)pvdata;
 
-        for (int i = 0; i < strlen(msg); i++)
+        // The payload is attacker controlled and is not guaranteed to be terminated, so bound the
+        // scan by what was written. The loop overwrites bytes, so an unterminated payload would be
+        // an out-of-bounds write, not just a read.
+        size_t limit = (size_t)result;
+        if ((size_t)cubdata < limit)
+        {
+            limit = (size_t)cubdata;
+        }
+        const int msgLen = (int)strnlen(msg, limit);
+
+        for (int i = 0; i < msgLen; i++)
         {
             if (msg[i] == '^')
             {
@@ -408,11 +467,11 @@ __int32 Protection::GetLobbyChatEntry(INT64 api, INT64 csteamidlobby, INT64 chat
             {
                 msg[i] = '.';
             }
-            else if (msg[i] == '$' && msg[i + 1] == '(')
+            else if (msg[i] == '$' && (i + 1) < msgLen && msg[i + 1] == '(')
             {
                 msg[i] = '.';
             }
-            else if (msg[i] == '[' && msg[i + 1] == '{')
+            else if (msg[i] == '[' && (i + 1) < msgLen && msg[i + 1] == '{')
             {
                 msg[i] = '.';
             }
@@ -435,9 +494,29 @@ __int64 Protection::CreateLobby(INT64 api, __int32 lobbyCreateType, __int32 maxp
     return ((__int64(__fastcall*)(INT64, INT64, INT64))GetOriginalSteamPtr(STEAMAPI_MATCHMAKING, STEAMAPI_MATCHMAKING_CREATELOBBY))(api, 1, maxplayers);
 }
 
+// s_playerData_ptr is null before player data is allocated and again after sign-out or disconnect,
+// and the read paths run on live Steam vtable entries, so validate before dereferencing.
+static bool TryGetLocalXuid(__int64& out)
+{
+    if (Protection::IsBadReadPtr((void*)s_playerData_ptr))
+    {
+        return false;
+    }
+
+    auto playerData = *(__int64**)s_playerData_ptr;
+    if (!playerData || Protection::IsBadReadPtr(playerData))
+    {
+        return false;
+    }
+
+    out = *playerData;
+    return true;
+}
+
 const char* Protection::GetUsernameXUIDPtr(INT64 a, INT64 b)
 {
-    if (b == **(__int64**)s_playerData_ptr)
+    __int64 localXuid = 0;
+    if (TryGetLocalXuid(localXuid) && b == localXuid)
     {
         return CustomName;
     }
@@ -477,18 +556,41 @@ bool Protection::IsBadReadPtr(void* p)
 }
 
 std::unordered_map<__int64, std::unordered_map<int, __int64>> Protection::SteamHAPIHooks;
-void Protection::SwapSteamAPIPointer(__int64 hLibrary, int vPointerIndex, void* CallFuncReplace)
+void Protection::SwapSteamAPIPointer(__int64 hLibrary, int vPointerIndex, void* CallFuncReplace, bool recordOriginal)
 {
-    auto steamLibrary = *(INT64*)hLibrary;
-    auto OldProtection = 0ul;
-    INT64* vtable = *(INT64**)steamLibrary;
-
-    if (SteamHAPIHooks.find(hLibrary) == SteamHAPIHooks.end())
+    // A null replacement means "restore a slot that was never swapped", which happens when Steam
+    // was not up at install time. Without this guard uninstall writes 0 into a live Steam vtable.
+    if (!CallFuncReplace)
     {
-        SteamHAPIHooks[hLibrary] = std::unordered_map<int, __int64>();
+        return;
     }
 
-    SteamHAPIHooks[hLibrary][vPointerIndex] = *(vtable + vPointerIndex);
+    // Unguarded game/Steam globals: null if Steam is not initialised when install() runs.
+    auto steamLibrary = *(INT64*)hLibrary;
+    if (!steamLibrary)
+    {
+        return;
+    }
+
+    auto OldProtection = 0ul;
+    INT64* vtable = *(INT64**)steamLibrary;
+    if (!vtable)
+    {
+        return;
+    }
+
+    // Only record when installing. On uninstall the slot still holds our hook, so recording it
+    // would leave the map pointing at our own function and the next caller would recurse into
+    // itself. It also allocates, which is unsafe in uninstall() with other threads suspended.
+    if (recordOriginal)
+    {
+        if (SteamHAPIHooks.find(hLibrary) == SteamHAPIHooks.end())
+        {
+            SteamHAPIHooks[hLibrary] = std::unordered_map<int, __int64>();
+        }
+
+        SteamHAPIHooks[hLibrary][vPointerIndex] = *(vtable + vPointerIndex);
+    }
 
     VirtualProtect(reinterpret_cast<void*>(vtable + vPointerIndex), 8, PAGE_EXECUTE_READWRITE, &OldProtection);
     *reinterpret_cast<void**>(vtable + vPointerIndex) = CallFuncReplace;
@@ -497,11 +599,22 @@ void Protection::SwapSteamAPIPointer(__int64 hLibrary, int vPointerIndex, void* 
 
 INT64 Protection::GetOriginalSteamPtr(__int64 hLibrary, int vtIndex)
 {
-    if (SteamHAPIHooks.find(hLibrary) == SteamHAPIHooks.end())
+    // find() rather than operator[]: the latter inserts an entry for slots that were never hooked,
+    // and it allocates uninstall() runs with other threads suspended, where that can deadlock on
+    // the heap lock.
+    auto lib = SteamHAPIHooks.find(hLibrary);
+    if (lib == SteamHAPIHooks.end())
     {
         return 0;
     }
-    return SteamHAPIHooks[hLibrary][vtIndex];
+
+    auto slot = lib->second.find(vtIndex);
+    if (slot == lib->second.end())
+    {
+        return 0;
+    }
+
+    return slot->second;
 }
 
 bool fs_exists(const char* filename)
@@ -517,10 +630,33 @@ bool fs_exists(const char* filename)
     return true;
 }
 
+static void trim_config_field(std::string& s)
+{
+    // Strip a UTF-8 BOM and surrounding whitespace, including the CR from a CRLF editor: the
+    // streams are binary, so a stray CR is hashed into the network password and the two players
+    // cannot join. Note this also changes the hash for passwords with deliberate whitespace.
+    if (s.size() >= 3 && (unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF)
+    {
+        s.erase(0, 3);
+    }
+
+    const char* ws = " \t\r\n";
+    auto first = s.find_first_not_of(ws);
+    if (first == std::string::npos)
+    {
+        s.clear();
+        return;
+    }
+
+    auto last = s.find_last_not_of(ws);
+    s = s.substr(first, last - first + 1);
+}
+
 struct patch_config
 {
     char playername[16];
     int isfriendsonly;
+    int debuglog;
     char* networkpassword;
     bool exists;
     std::filesystem::file_time_type modified;
@@ -530,6 +666,7 @@ struct patch_config
         networkpassword = (char*)malloc(4);
         memset(networkpassword, 0, 4);
         isfriendsonly = true;
+        debuglog = 0;
         exists = false;
         modified = std::filesystem::file_time_type();
         __playername();
@@ -572,7 +709,8 @@ struct patch_config
 
         outfile << "playername=" << playername << std::endl;
         outfile << "isfriendsonly=" << isfriendsonly << std::endl;
-        outfile << "networkpassword=" << networkpassword << std::endl;
+        outfile << "networkpassword=" << (networkpassword ? networkpassword : "") << std::endl;
+        outfile << "debuglog=" << debuglog << std::endl;
 
         outfile.close();
         update_watcher_time(path);
@@ -589,18 +727,31 @@ struct patch_config
             return;
         }
 
+        // Staged first, then committed per key that was actually present: the watcher fires on
+        // mtime, so a read can catch the file mid-rewrite, and a missing key must leave the current
+        // value alone rather than clear the network password. This does not make torn reads safe.
+        std::string staged_playername;
+        std::string staged_password;
+        int staged_isfriendsonly = 1;
+        int staged_debuglog = 0;
+        bool seen_playername = false;
+        bool seen_isfriendsonly = false;
+        bool seen_password = false;
+
         std::string line;
-        while (!std::getline(infile, line).eof())
+        while (std::getline(infile, line))
         {
             auto sep = line.find("=");
-            if (sep == std::string::npos || sep >= (line.length() - 1)) // must have a value
+            if (sep == std::string::npos)
             {
                 continue;
             }
 
-            // is this config resilliant to whitespace issues? nope!
             auto token = line.substr(0, sep);
             auto val = line.substr(sep + 1);
+            trim_config_field(token);
+            trim_config_field(val);
+
             switch (fnv1a(token.data()))
             {
             case FNV32("playername"):
@@ -609,36 +760,79 @@ struct patch_config
                 {
                     val = val.substr(0, 15);
                 }
-                __playername();
-                strcpy_s(playername, sizeof(playername), val.data());
+                staged_playername = val;
+                seen_playername = !val.empty(); // empty value: leave the current name alone
             }
             break;
             case FNV32("isfriendsonly"):
             {
+                if (val.empty())
+                {
+                    // Unspecified: leave the current setting alone rather than silently
+                    // re-enable friends-only.
+                    break;
+                }
+
+                seen_isfriendsonly = true;
                 std::istringstream ivalread(val);
-                ivalread >> isfriendsonly;
+                ivalread >> staged_isfriendsonly;
                 if (ivalread.fail())
                 {
-                    isfriendsonly = false; // its better to have it fail then to have people who cant disable this setting because of whatever reason
+                    // Malformed: fail open, so nobody is left unable to turn this setting off.
+                    staged_isfriendsonly = 0;
+                }
+            }
+            break;
+            case FNV32("debuglog"):
+            {
+                // Malformed or empty means off; nothing to preserve, this only controls
+                // diagnostics.
+                std::istringstream ivalread(val);
+                ivalread >> staged_debuglog;
+                if (ivalread.fail())
+                {
+                    staged_debuglog = 0;
                 }
             }
             break;
             case FNV32("networkpassword"):
             {
-                if (networkpassword)
-                {
-                    free(networkpassword);
-                    networkpassword = NULL;
-                }
                 if (val.length() > 1023)
                 {
                     val = val.substr(0, 1023); // seriously?!
                 }
-                auto bufsize = val.length() + 1;
-                networkpassword = (char*)malloc(bufsize);
-                strcpy_s(networkpassword, bufsize, val.data());
+                staged_password = val;
+                seen_password = true; // an empty value here is meaningful: it clears the password
             }
             break;
+            }
+        }
+
+        if (seen_playername)
+        {
+            __playername();
+            strcpy_s(playername, sizeof(playername), staged_playername.data());
+        }
+
+        if (seen_isfriendsonly)
+        {
+            isfriendsonly = staged_isfriendsonly;
+        }
+
+        debuglog = staged_debuglog;
+
+        if (seen_password)
+        {
+            if (networkpassword)
+            {
+                free(networkpassword);
+                networkpassword = NULL;
+            }
+            auto bufsize = staged_password.length() + 1;
+            networkpassword = (char*)malloc(bufsize);
+            if (networkpassword)
+            {
+                strcpy_s(networkpassword, bufsize, staged_password.data());
             }
         }
 
@@ -654,14 +848,26 @@ void apply_settings()
     SetPlayerName(user_config.playername);
     SetFriendsOnly(user_config.isfriendsonly);
     SetNetworkPassword(user_config.networkpassword);
+    g_trace_enabled = user_config.debuglog != 0;
 }
 
 DWORD WINAPI MainThread(LPVOID lpParam)
 {
-    std::srand(time(NULL));
-    *(__int32*)OFFSET(0x11250898) = rand();
+    std::srand((unsigned)time(NULL));
 
-    for (;;)
+    auto seedAddr = (__int32*)OFFSET(0x11250898);
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery(seedAddr, &mbi, sizeof(mbi)) == sizeof(mbi)
+        && mbi.State == MEM_COMMIT
+        && (mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))
+        && !(mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS))) // a guard page passes the mask but faults on write
+    {
+        *seedAddr = rand();
+    }
+
+    // Unload() suspends this thread, uninstalls, then resumes it, so the flag is seen on the next
+    // iteration. Without it the loop keeps running inside a module that is about to be freed.
+    while (!Protection::Unloading)
     {
         if (user_config.update_watcher_time(PATCH_CONFIG_LOCATION))
         {
@@ -691,6 +897,24 @@ __int64 old_IsProcessorFeaturePresent = 0;
 
 void Protection::install()
 {
+    if (Protection::Installed)
+    {
+        return;
+    }
+
+    // The previous watcher must be gone before the flag is cleared, or it never observes Unloading
+    // and a second watcher mutates the same patch_config alongside it. Also stops the handle leak.
+    if (Protection::MainThreadHandle)
+    {
+        WaitForSingleObject(Protection::MainThreadHandle, INFINITE);
+        CloseHandle(Protection::MainThreadHandle);
+        Protection::MainThreadHandle = nullptr;
+    }
+
+    // Cleared here as well as set in uninstall(): otherwise a reinstall spawns a MainThread whose
+    // loop condition is already false, killing the config watcher.
+    Protection::Unloading = false;
+
     LobbyMsgRW_PackageInt = (tLobbyMsgRW_PackageInt)PTR_LobbyMsgRW_PackageInt;
     LobbyMsgRW_PackageUChar = (tLobbyMsgRW_PackageUChar)PTR_LobbyMsgRW_PackageUChar;
     LobbyMsgRW_PackageString = (tLobbyMsgRW_PackageString)PTR_LobbyMsgRW_PackageString;
@@ -734,7 +958,10 @@ void Protection::install()
     CL_GetConfigString = (tCL_GetConfigString)PTR_CL_GetConfigString;
     Cbuf_AddText = (tCbuf_AddText)PTR_Cbuf_AddText;
     I_stricmp = (tI_stricmp)PTR_I_stricmp;
-    CachedXUID = **(__int64**)s_playerData_ptr;
+    if (!TryGetLocalXuid(CachedXUID))
+    {
+        CachedXUID = 0;
+    }
 
     SetNetworkPassword(0);
 
@@ -988,20 +1215,29 @@ void Protection::install()
             }
         };
 
-    Protection::Old_lobbymsgprints = *(__int64*)PTR_lobbymsgprints;
-    *(__int64*)PTR_lobbymsgprints = 0xFFEEDDCC44332212;
+    if (Protection::ExceptionHookInstalled)
+    {
+        Protection::Old_lobbymsgprints = *(__int64*)PTR_lobbymsgprints;
+        *(__int64*)PTR_lobbymsgprints = 0xFFEEDDCC44332212;
+    }
     Protection::CachedRetnAddy = PTR_saveLobbyMsgExceptAddy;
 
     // Call create lobby again
     ((void(__fastcall*)(__int64))REBASE(0x1EA6010))(REBASE(0x113A4A60));
 
     INT64 ptrDvar = *(INT64*)(REBASE(0x1686ED20));
-    *(DWORD*)(ptrDvar + 0x18) = 0; // clear flags
+    if (ptrDvar)
+    {
+        *(DWORD*)(ptrDvar + 0x18) = 0; // clear flags
+    }
 
     Dvar_SetFromStringByName("ui_error_callstack_ship", "1", true);
 
     ptrDvar = *(INT64*)(REBASE(0xA0378B8));
-    *(DWORD*)(ptrDvar + 0x18) = 0; // clear flags
+    if (ptrDvar)
+    {
+        *(DWORD*)(ptrDvar + 0x18) = 0; // clear flags
+    }
 
     Dvar_SetFromStringByName("g_allowvote", "0", true);
     //Dvar_SetFromStringByName("sv_mapswitch", "0", true); // Caused inf black screen when loading campaign maps.
@@ -1010,27 +1246,43 @@ void Protection::install()
     if (IsInjectorlessInstall)
     {
         load_settings_initial();
-        CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
+        // Handle retained so Unload() can join this thread; see Protection::MainThreadHandle.
+        Protection::MainThreadHandle = CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
     }
+
+    ZLOG("install done: hooked=%d oldPrints=%p retnAddy=%p ZwContinue=%p",
+        (int)Protection::ExceptionHookInstalled, (void*)Protection::Old_lobbymsgprints,
+        (void*)Protection::CachedRetnAddy, (void*)(uintptr_t)Protection::ZwContinue);
+    Protection::Installed = true;
 }
 
 void Protection::uninstall()
 {
-    *(__int64*)PTR_lobbymsgprints = Protection::Old_lobbymsgprints;
+    if (!Protection::Installed)
+    {
+        return;
+    }
+    Protection::Installed = false;
+    Protection::Unloading = true;
+
+    if (*(__int64*)PTR_lobbymsgprints == 0xFFEEDDCC44332212)
+    {
+        *(__int64*)PTR_lobbymsgprints = Protection::Old_lobbymsgprints;
+    }
     SetNetworkPassword(0);
     Iat_hook_::detour_iat_ptr("IsProcessorFeaturePresent", (void*)old_IsProcessorFeaturePresent);
 
-    SwapSteamAPIPointer(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_GETUSERNAME, (void*)GetOriginalSteamPtr(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_GETUSERNAME));
-    SwapSteamAPIPointer(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_VT_NAMEBYXUID, (void*)GetOriginalSteamPtr(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_VT_NAMEBYXUID));
+    SwapSteamAPIPointer(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_GETUSERNAME, (void*)GetOriginalSteamPtr(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_GETUSERNAME), false);
+    SwapSteamAPIPointer(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_VT_NAMEBYXUID, (void*)GetOriginalSteamPtr(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_VT_NAMEBYXUID), false);
 
-    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT, (void*)GetOriginalSteamPtr(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT));
-    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT2, (void*)GetOriginalSteamPtr(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT2));
-    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_IS_VAC_BANNED, (void*)GetOriginalSteamPtr(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_IS_VAC_BANNED));
-    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_GET_DLC_DOWNLOAD_PROGRESS, (void*)GetOriginalSteamPtr(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_GET_DLC_DOWNLOAD_PROGRESS));
+    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT, (void*)GetOriginalSteamPtr(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT), false);
+    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT2, (void*)GetOriginalSteamPtr(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT2), false);
+    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_IS_VAC_BANNED, (void*)GetOriginalSteamPtr(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_IS_VAC_BANNED), false);
+    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_GET_DLC_DOWNLOAD_PROGRESS, (void*)GetOriginalSteamPtr(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_GET_DLC_DOWNLOAD_PROGRESS), false);
 
-    SwapSteamAPIPointer(STEAMAPI_MATCHMAKING, STEAMAPI_MATCHMAKING_GETLOBBYCHATENTRY, (void*)GetOriginalSteamPtr(STEAMAPI_MATCHMAKING, STEAMAPI_MATCHMAKING_GETLOBBYCHATENTRY));
-    SwapSteamAPIPointer(STEAMAPI_MATCHMAKING, STEAMAPI_MATCHMAKING_CREATELOBBY, (void*)GetOriginalSteamPtr(STEAMAPI_MATCHMAKING, STEAMAPI_MATCHMAKING_CREATELOBBY));
-    SwapSteamAPIPointer(STEAMAPI_NETWORKING, STEAMAPI_NETWORKING_READP2PPACKET, (void*)GetOriginalSteamPtr(STEAMAPI_NETWORKING, STEAMAPI_NETWORKING_READP2PPACKET));
+    SwapSteamAPIPointer(STEAMAPI_MATCHMAKING, STEAMAPI_MATCHMAKING_GETLOBBYCHATENTRY, (void*)GetOriginalSteamPtr(STEAMAPI_MATCHMAKING, STEAMAPI_MATCHMAKING_GETLOBBYCHATENTRY), false);
+    SwapSteamAPIPointer(STEAMAPI_MATCHMAKING, STEAMAPI_MATCHMAKING_CREATELOBBY, (void*)GetOriginalSteamPtr(STEAMAPI_MATCHMAKING, STEAMAPI_MATCHMAKING_CREATELOBBY), false);
+    SwapSteamAPIPointer(STEAMAPI_NETWORKING, STEAMAPI_NETWORKING_READP2PPACKET, (void*)GetOriginalSteamPtr(STEAMAPI_NETWORKING, STEAMAPI_NETWORKING_READP2PPACKET), false);
 
     *(__int64*)PTR_UpdatePreloadIdleFN = REBASE(0x131E350);
 }
@@ -1039,11 +1291,15 @@ char Protection::requestOut[0x20000]{};
 char Protection::lobbyMsgCpy[0x50]{};
 void Protection::InspectLM(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
 {
+    // Do NOT reset InspectorDepth here. This runs on the faulting thread and can be entered while
+    // an InspectorScope is still live; zeroing it drives the count negative when that scope exits,
+    // which turns suppression off mid-parse and drops legitimate join traffic. The counter nests
+    // correctly on its own.
     __int64 retnAddy = *(__int64*)(ContextRecord->Rsp + 0x28);
-
     // we expect a very specific return addy to operate on
     if (retnAddy != CachedRetnAddy)
     {
+        ZLOG("inspectLM skipped: retnAddy=%p want=%p", (void*)retnAddy, (void*)Protection::CachedRetnAddy);
         goto ExitCleanly;
     }
 
@@ -1057,7 +1313,10 @@ void Protection::InspectLM(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRe
 
         if (Protection::handle_packet_callbacks.find(lobbyMsgType) != Protection::handle_packet_callbacks.end())
         {
+            Protection::InspectorScope _inspecting;
+            ZLOG("inspect %d enter (msgType=%d)", lobbyMsgType, msgType);
             Protection::handle_packet_callbacks[lobbyMsgType](lobbyMsgTypePtr, lobbyMsg);
+            ZLOG("inspect %d exit (result=%d)", lobbyMsgType, *lobbyMsgTypePtr);
             if (*lobbyMsgTypePtr == 0xFF)
             {
                 //XLOG("^6DROPPED LOBBYMESSAGE %d", lobbyMsgType);
@@ -1113,7 +1372,13 @@ int Protection::MSG_JoinParty_Package_Inspect(char* _this, char* lobbyMsg)
 
     if (LobbyMsgRW_PackageElement(lobbyMsg, *(__int32*)(_this + 24) > 0))
     {
-        if (*(__int32*)(_this + 24) <= 0) // this is an element even though the packet claims to have 0 members... BoF attempt!
+        // KNOWN UNFIXED (issue #26 on this path). A membercount we failed to parse reads back
+        // as 0 from the memset above, and a legitimate join with members is then dropped here
+        // as an overflow attempt. Gating this on packageOK does NOT help: the check at
+        // "if (!packageOK) return 1" above means packageOK is always true by this point, and
+        // inside an InspectorScope hkLobbyMsgRW_PackageInt masks a failed parse to true anyway.
+        // A real fix needs the membercount parse result captured separately.
+        if (*(__int32*)(_this + 24) <= 0) // element even though the packet claims 0 members... BoF attempt!
         {
             // crash attempt via BoF
             return 3;
@@ -1179,17 +1444,19 @@ int Protection::MSG_LobbyState_Package_Inspect(char* __this, char* lobbyMsg)
 
     LobbyMsgRW_PackageArrayStart(lobbyMsg, STR(clientlist));
 
-    if (_this[24] > 18)
+    const int clientCount = _this[24];
+
+    if (clientCount > 18)
     {
         // crash attempt via BoF
         return 2;
     }
 
     int index = 0;
-    bool hasNextElement = LobbyMsgRW_PackageElement(lobbyMsg, index < _this[24]);
+    bool hasNextElement = LobbyMsgRW_PackageElement(lobbyMsg, index < clientCount);
 
 
-    while (hasNextElement && index < _this[24])
+    while (hasNextElement && index < clientCount)
     {
         __int32 offset = 292 * index;
         __int64 offset2 = (__int64)&_this[offset + 26];
@@ -1216,7 +1483,7 @@ int Protection::MSG_LobbyState_Package_Inspect(char* __this, char* lobbyMsg)
         }
 
         index++;
-        hasNextElement = LobbyMsgRW_PackageElement(lobbyMsg, index < _this[24]);
+        hasNextElement = LobbyMsgRW_PackageElement(lobbyMsg, index < clientCount);
     }
 
     if (hasNextElement)
@@ -1418,7 +1685,7 @@ int Protection::MSG_LobbyStateGame_Package_Inspect(char* __this, char* lobbyMsg)
 
         packageOK = packageOK && LobbyMsgRW_PackageInt(lobbyMsg, STR(settingssize), (__int32*)(_this + 7350));
 
-        if ((_this[7350] <= 0) || (_this[7350] > 0xC000))
+        if (packageOK && ((_this[7350] <= 0) || (_this[7350] > 0xC000)))
         {
             // BoF attempt
             return 20 + 5;
@@ -1517,6 +1784,9 @@ int Protection::MSG_LobbyStateGame_Package_Inspect(char* __this, char* lobbyMsg)
 
 PackageOK:
 
+    // The theater and unknown-lobbymode paths deliberately reach here without testing packageOK:
+    // that test is only validated on the lobbyMode == 0 path, and a false positive elsewhere drops
+    // legitimate lobby traffic. The structural checks above carry the anti-crash weight.
     return 0;
 }
 
@@ -1558,10 +1828,17 @@ int Protection::MSG_HostHeartbeat_Inspect(char* __this, char* lobbyMsg)
 
 bool Protection::CheckPendingInfoRequests(__int64 XUID, msg_t* _msg)
 {
+    if (!_msg)
+    {
+        return false;
+    }
+
     msg_t cpyMsg;
     memcpy(&cpyMsg, _msg, sizeof(msg_t));
 
     unsigned int size = cpyMsg.cursize - cpyMsg.readcount;
+    ZLOG("checkPending: xuid=%p cursize=%u readcount=%u size=%u",
+        (void*)XUID, cpyMsg.cursize, cpyMsg.readcount, size);
     if (size < 2048u)
     {
         char data[2048]{};
@@ -1576,22 +1853,33 @@ bool Protection::CheckPendingInfoRequests(__int64 XUID, msg_t* _msg)
                 return false;
             }
 
+            ZLOG("checkPending: parsed msgType=%d", lobby_msg.msgType);
             if (lobby_msg.msgType == MESSAGE_TYPE_INFO_RESPONSE)
             {
                 Msg_InfoResponse response{};
-                __int32 result = MSG_InfoResponseSafe(&response, &lobby_msg);
+                __int32 result;
+                {
+                    // Scoped tightly so only our own parser runs with validation suppressed;
+                    // everything after this block must see real Package* results.
+                    Protection::InspectorScope _inspecting;
+                    result = MSG_InfoResponseSafe(&response, &lobby_msg);
+                }
                 if (result)
                 {
-                    //XLOG("DROP LM: REASON %d", result);
-                    return true;
+                    // Advisory, not a drop: this parser has never been validated against a genuine
+                    // info response, and a false positive would blank the server browser and break
+                    // invite-joins. Only drop here once it is checked against captured traffic.
+                    //XLOG("SUSPECT INFO RESPONSE: REASON %d", result);
                 }
 
+                ZLOG("checkPending: infoResponse inspect=%d, handing to game", result);
                 dwInstantHandleLobbyMessage(XUID, 0, (char*)_msg);
                 return true;
             }
             else
             {
-                if (!XUID || XUID == **(__int64**)s_playerData_ptr)
+                __int64 localXuid = 0;
+                if (!XUID || (TryGetLocalXuid(localXuid) && XUID == localXuid))
                 {
                     //XLOG("KEEP LM: XUID LOCAL");
                     return false;
@@ -1763,20 +2051,40 @@ namespace Iat_hook_
         if (!module)
             module = GetModuleHandle(0);
 
+        if (!module || !function)
+            return 0;
+
         PIMAGE_DOS_HEADER img_dos_headers = (PIMAGE_DOS_HEADER)module;
-        PIMAGE_NT_HEADERS img_nt_headers = (PIMAGE_NT_HEADERS)((BYTE*)img_dos_headers + img_dos_headers->e_lfanew);
-        PIMAGE_IMPORT_DESCRIPTOR img_import_desc = (PIMAGE_IMPORT_DESCRIPTOR)((BYTE*)img_dos_headers + img_nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
+
         if (img_dos_headers->e_magic != IMAGE_DOS_SIGNATURE)
-            printf("\n");
+            return 0;
+
+        PIMAGE_NT_HEADERS img_nt_headers = (PIMAGE_NT_HEADERS)((BYTE*)img_dos_headers + img_dos_headers->e_lfanew);
+        if (img_nt_headers->Signature != IMAGE_NT_SIGNATURE)
+            return 0;
+
+        const auto importDirRva = img_nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+        if (!importDirRva)
+            return 0;
+
+        PIMAGE_IMPORT_DESCRIPTOR img_import_desc = (PIMAGE_IMPORT_DESCRIPTOR)((BYTE*)img_dos_headers + importDirRva);
 
         for (IMAGE_IMPORT_DESCRIPTOR* iid = img_import_desc; iid->Name != 0; iid++) {
+            // A bound or stripped descriptor has no name array, so without this the DOS header is
+            // read as a thunk array and strcmp'd.
+            if (!iid->OriginalFirstThunk || !iid->FirstThunk)
+                continue;
+
             for (int func_idx = 0; *(func_idx + (void**)(iid->FirstThunk + (size_t)module)) != nullptr; func_idx++) {
-                char* mod_func_name = (char*)(*(func_idx + (size_t*)(iid->OriginalFirstThunk + (size_t)module)) + (size_t)module + 2);
-                const intptr_t nmod_func_name = (intptr_t)mod_func_name;
-                if (nmod_func_name >= 0) {
-                    if (!::strcmp(function, mod_func_name))
-                        return func_idx + (void**)(iid->FirstThunk + (size_t)module);
-                }
+                const size_t thunk = *(func_idx + (size_t*)(iid->OriginalFirstThunk + (size_t)module));
+                if (!thunk)
+                    break;
+                if (thunk & IMAGE_ORDINAL_FLAG64)
+                    continue; // imported by ordinal, there is no name here
+
+                char* mod_func_name = (char*)(thunk + (size_t)module + 2);
+                if (!::strcmp(function, mod_func_name))
+                    return func_idx + (void**)(iid->FirstThunk + (size_t)module);
             }
         }
 
@@ -1787,7 +2095,8 @@ namespace Iat_hook_
     uintptr_t detour_iat_ptr(const char* function, void* newfunction, HMODULE module)
     {
         auto&& func_ptr = find(function, module);
-        if (*func_ptr == newfunction || *func_ptr == nullptr)
+        
+        if (!func_ptr || *func_ptr == newfunction || *func_ptr == nullptr)
             return 0;
 
         DWORD old_rights, new_rights = PAGE_READWRITE;

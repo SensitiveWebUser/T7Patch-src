@@ -65,13 +65,24 @@ public:
 	static bool IsFriendsOnly;
 	static bool IsMTLPatchEnabled;
 	static bool IsInjectorlessInstall;
+	static bool Installed;
+	static volatile bool Unloading;
+	static bool ExceptionHookInstalled;
+	static void* MainThreadHandle;
+	static thread_local int InspectorDepth;
+
+	struct InspectorScope
+	{
+		InspectorScope() { ++Protection::InspectorDepth; }
+		~InspectorScope() { --Protection::InspectorDepth; }
+	};
 
 	static void install();
 	static void uninstall();
 	static bool IsBadReadPtr(void* p);
 	static const char* GetUsernamePtr(INT64 a);
 	static const char* GetUsernameXUIDPtr(INT64 a, INT64 b);
-	static void SwapSteamAPIPointer(__int64 hLibrary, int vPointerIndex, void* CallFuncReplace);
+	static void SwapSteamAPIPointer(__int64 hLibrary, int vPointerIndex, void* CallFuncReplace, bool recordOriginal = true);
 	static INT64 GetOriginalSteamPtr(__int64 hLibrary, int vtIndex);
 	static __int32 CL_SwitchState_Idle_Update(INT64 sw);
 	//static void SetThreadExceptions(PCONTEXT ThreadContext); // (Debug registers are now being watched, no bypass yet but protections and arxan evasion have been changed to stop relying on this)
@@ -168,5 +179,5 @@ fn_return WINAPI __ ## fn_name fn_args
 #define IHOOK_INSTALL(fn_name, module__) o ## fn_name = (fn_name ## _fn)Iat_hook_::detour_iat_ptr(#fn_name, (void*)__ ## fn_name, module__);
 #define IHOOK_ORIGINAL(fn_name, fn_args) o ## fn_name fn_args
 
-#define ZBR_PREFIX_BYTE (unsigned char)((Protection::PrivatePassword[1] & 0xFF0000) >> 16)
-#define ZBR_PREFIX_BYTE2 (unsigned char)((Protection::PrivatePassword[1] & 0xFF000000) >> 24)
+#define ZBR_PREFIX_BYTE ((unsigned char)((Protection::PrivatePassword[1] & 0xFF0000) >> 16))
+#define ZBR_PREFIX_BYTE2 ((unsigned char)((Protection::PrivatePassword[1] & 0xFF000000) >> 24))
