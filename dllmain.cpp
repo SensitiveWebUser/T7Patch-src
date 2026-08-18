@@ -27,7 +27,7 @@ std::unordered_map<INT64, CONTEXT> SavedExceptions;
 std::unordered_map<DWORD, bool> EncounteredIPs;
 std::unordered_map<DWORD, debug_msg_info> PrevErrors;
 #define DMSG_COOLDOWN_TICKS 5000
-DWORD lck_dumping = NULL;
+volatile LONG g_crashDumpOwnerTid = 0;
 char error_msg_buff[1024];
 const char clientfield_doesnt_exist[] = "Clientfield does not exist";
 bool is_unhooking = false;
@@ -46,6 +46,17 @@ void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
         ContextRecord->Rip = ROP_RETN;
         is_unhooking = false;
         ZwContinue(ContextRecord, false);
+    }
+
+    // Logged only for unusual exceptions
+    if (ExceptionRecord && ContextRecord
+        && ExceptionRecord->ExceptionCode != 0x80000003
+        && !Protection::Unloading)
+    {
+        ZLOG("except code=%08X addr=%p rip=%p rsp=%p rcx=%p",
+            ExceptionRecord->ExceptionCode, ExceptionRecord->ExceptionAddress,
+            (void*)ContextRecord->Rip, (void*)ContextRecord->Rsp,
+            (void*)ContextRecord->Rcx);
     }
 
     Protection::ExceptHook(ExceptionRecord, ContextRecord);
@@ -275,14 +286,15 @@ void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
     bool b_fatal = false;
     if ((ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) || (ExceptionRecord->ExceptionFlags & EXCEPTION_NONCONTINUABLE)/* || (strstr(module_name, "blackops3.exe") && STATUS_ILLEGAL_INSTRUCTION == ExceptionRecord->ExceptionCode)*/)
     {
-        if (lck_dumping)
+        // Atomic claim of the dump, so two threads faulting at once cannot both write the log.
+        const LONG self = (LONG)GetCurrentThreadId();
+        if (InterlockedCompareExchange(&g_crashDumpOwnerTid, self, 0) != 0)
         {
             INT64 addy = (INT64)ExceptionRecord->ExceptionAddress;
             SavedExceptions[addy] = *ContextRecord;
         }
         else
         {
-            lck_dumping = GetCurrentThreadId();
 
             FILE* f;
             f = fopen(CRASH_LOG_NAME, "a+"); // a+ (create + append)
@@ -291,12 +303,12 @@ void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
 #ifdef USE_NLOG
                 ALOG("File not opened");
 #endif
-                // we cant log??? fuck.
+                // Logging failed
                 ExitProcess(-444);
             }
 
-            //ALOG("Crash log %p\n\n", time(NULL));
-            fprintf(f, "Crash log %p\n\n", time(NULL));
+            // Stamp the version so a crash report can be attributed to a release.
+            fprintf(f, "%s\nCrash log %p\n\n", ZBR_VERSION_FULL, time(NULL));
             INT64 addy = (INT64)ExceptionRecord->ExceptionAddress;
             SavedExceptions[addy] = *ContextRecord;
             while (SavedExceptions.size())
@@ -336,20 +348,24 @@ void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
                 //ALOG("[%p]Dr0: (%p) Dr1: (%p) Dr2: (%p) Dr3: (%p)\n", kvp.first, kvp.second.Dr0, kvp.second.Dr1, kvp.second.Dr2, kvp.second.Dr3);
                 fprintf(f, "[%p]Dr0: (%p) Dr1: (%p) Dr2: (%p) Dr3: (%p)\n", kvp.first, kvp.second.Dr0, kvp.second.Dr1, kvp.second.Dr2, kvp.second.Dr3);
 
-                for (int i = 0; i < ((STATUS_ILLEGAL_INSTRUCTION == ExceptionRecord->ExceptionCode) ? 0x1200 : 0x400); i += 0x10)
+                const int stackDumpBytes = (STATUS_ILLEGAL_INSTRUCTION == ExceptionRecord->ExceptionCode) ? 0x1200 : 0x400;
+                for (int i = 0; i < stackDumpBytes; i += 0x10)
                 {
-                    //ALOG("[%p] %p %p\n", kvp.second.Rsp + i, *(int64_t*)(kvp.second.Rsp + i), *(int64_t*)(kvp.second.Rsp + i + 8));
+                    if (Protection::IsBadReadPtr((void*)(kvp.second.Rsp + i))
+                        || Protection::IsBadReadPtr((void*)(kvp.second.Rsp + i + 8)))
+                    {
+                        fprintf(f, "[%p] <unreadable, stack dump truncated>\n", (void*)(kvp.second.Rsp + i));
+                        break;
+                    }
+
                     fprintf(f, "[%p] %p %p\n\n\n", kvp.second.Rsp + i, *(int64_t*)(kvp.second.Rsp + i), *(int64_t*)(kvp.second.Rsp + i + 8));
                 }
                 SavedExceptions.erase(kvp.first);
             }
 
-            // dump script context
-            //dump_script_context(f);
-
             std::fflush(f);
             std::fclose(f);
-            lck_dumping = NULL;
+            g_crashDumpOwnerTid = 0;
         }
 
         if (STATUS_ILLEGAL_INSTRUCTION != ExceptionRecord->ExceptionCode)
@@ -360,7 +376,7 @@ void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
 
     if (b_fatal)
     {
-        if (lck_dumping && lck_dumping != GetCurrentThreadId())
+        if (g_crashDumpOwnerTid && g_crashDumpOwnerTid != (LONG)GetCurrentThreadId())
         {
             HANDLE hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, GetCurrentThreadId());
             ContextRecord->Rip = (INT64)SuspendThread;
@@ -374,7 +390,14 @@ void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
     }
 }
 
-__int64 __fn_ptr_hook = 0;
+__int64 g_exceptionDispatchSlot = 0;
+void* g_exceptionDispatchOriginal = nullptr;
+bool wine_hook_installed = false;
+// Cached at install so UninstallHook need not look the module up by name: that takes the loader
+// lock, and UninstallHook runs with every other thread suspended.
+__int64 g_kiUserExceptionDispatcher = 0;
+// Guards RunPatching against re-entry; cleared by Unload() so a reload is still possible.
+bool g_patched = false;
 #define HOOK_SIZE_WINE 0x1B
 unsigned __int8 old_data[HOOK_SIZE_WINE];
 unsigned __int8 new_data[HOOK_SIZE_WINE] = { 0x48, 0xB8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x48, 0x89, 0xE2, 0x48, 0x8D, 0x8C, 0x24, 0xF0, 0x04, 0x00, 0x00, 0xFF, 0xD0, 0x90, 0x90, 0x90, 0x90 };
@@ -406,78 +429,110 @@ void wine_uninstallhook(__int64 kiuserexceptiondispatcher)
     VirtualProtect(reinterpret_cast<void*>(begin_write), HOOK_SIZE_WINE, OldProtection, &OldProtection);
 }
 
-void old_windows_installhook(void* func, __int64 kiuserexceptiondispatcher)
-{
-    // TODO
-}
-
-void old_windows_uninstallhook(__int64 kiuserexceptiondispatcher)
-{
-    // TODO
-}
-
-void InstallHook(void* func)
+bool InstallHook(void* func)
 {
     auto kiuserexceptiondispatcher = (__int64)GetProcAddress(GetModuleHandleA("ntdll.dll"), "KiUserExceptionDispatcher");
+    g_kiUserExceptionDispatcher = kiuserexceptiondispatcher;
 
     if (kiuserexceptiondispatcher)
     {
+        ZLOG("installHook: dispatcher=%p prologue=%08X",
+            (void*)kiuserexceptiondispatcher, *(__int32*)kiuserexceptiondispatcher);
         if (*(__int32*)kiuserexceptiondispatcher == 0x58B48FC)
         {
             auto distance = *(DWORD*)(kiuserexceptiondispatcher + 4);
             auto ptr = (kiuserexceptiondispatcher + 8) + distance;
-            __fn_ptr_hook = ptr;
-
+            g_exceptionDispatchSlot = ptr;
+            g_exceptionDispatchOriginal = *reinterpret_cast<void**>(ptr);
             auto OldProtection = 0ul;
-            VirtualProtect(reinterpret_cast<void*>(ptr), 8, PAGE_EXECUTE_READWRITE, &OldProtection);
+
+            if (!VirtualProtect(reinterpret_cast<void*>(ptr), 8, PAGE_EXECUTE_READWRITE, &OldProtection))
+            {
+                g_exceptionDispatchSlot = 0;
+                g_exceptionDispatchOriginal = nullptr;
+                return false;
+            }
+
             *reinterpret_cast<void**>(ptr) = func;
+            const bool applied = (*reinterpret_cast<void**>(ptr) == func);
             VirtualProtect(reinterpret_cast<void*>(ptr), 8, OldProtection, &OldProtection);
+
+            if (!applied)
+            {
+                g_exceptionDispatchSlot = 0;
+                g_exceptionDispatchOriginal = nullptr;
+                return false;
+            }
+
+            return true;
         }
         else if (*(__int32*)kiuserexceptiondispatcher == 0x248C8B48)
         {
+        ZLOG("installHook: wine path");
             wine_installhook(func, kiuserexceptiondispatcher);
+            wine_hook_installed = true;
+            return true;
         }
         else
         {
-            old_windows_installhook(func, kiuserexceptiondispatcher);
-        }
     }
+
+    return false;
 }
 
 void UninstallHook()
 {
-    // unload current thread's dr7
-    __int64 off = INT3_2_BO3;
-    ((void(__fastcall*)())off)(); // force an exception to install the exception handler and setup debug registers
+    if (!g_exceptionDispatchSlot && !wine_hook_installed)
+    {
+        is_unhooking = false;
+        return;
+    }
 
-    auto kiuserexceptiondispatcher = (__int64)GetProcAddress(GetModuleHandleA("ntdll.dll"), "KiUserExceptionDispatcher");
+    __int64 int3GadgetAddr = INT3_2_BO3;
+    ((void(__fastcall*)())int3GadgetAddr)(); // force an exception to install the exception handler and setup debug registers
+
+    auto kiuserexceptiondispatcher = g_kiUserExceptionDispatcher;
 
     if (kiuserexceptiondispatcher)
     {
         if (*(__int32*)kiuserexceptiondispatcher == 0x58B48FC)
         {
-            if (__fn_ptr_hook)
+            if (g_exceptionDispatchSlot)
             {
-                auto ptr = __fn_ptr_hook;
+                auto ptr = g_exceptionDispatchSlot;
                 auto OldProtection = 0ul;
                 VirtualProtect(reinterpret_cast<void*>(ptr), 8, PAGE_EXECUTE_READWRITE, &OldProtection);
-                *reinterpret_cast<void**>(ptr) = __nullsub;
+                *reinterpret_cast<void**>(ptr) = g_exceptionDispatchOriginal;
                 VirtualProtect(reinterpret_cast<void*>(ptr), 8, OldProtection, &OldProtection);
+                g_exceptionDispatchSlot = 0;
+                g_exceptionDispatchOriginal = nullptr;
             }
         }
         else if (*(__int32*)kiuserexceptiondispatcher == 0x248C8B48)
         {
-            wine_uninstallhook(kiuserexceptiondispatcher);
+            if (wine_hook_installed)
+            {
+                wine_uninstallhook(kiuserexceptiondispatcher);
+                wine_hook_installed = false;
+            }
         }
         else
         {
             old_windows_uninstallhook(kiuserexceptiondispatcher);
         }
     }
+
+    Protection::ExceptionHookInstalled = false;
 }
 
 void RunPatching()
 {
+    // Re-entry guard
+    if (g_patched)
+    {
+        return;
+    }
+
 	// Set the process priority to above normal to help with performance
     SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
 
@@ -487,8 +542,15 @@ void RunPatching()
 	// Set a default player name if none is set
     if (!*Protection::CustomName) { snprintf(Protection::CustomName, 16, "Unknown Soldier"); }
 
-    // Take care of arxan
-    PatchChecksumComparisons_Precomputed();
+    // Take care of arxan. Every offset below is specific to one BlackOps3.exe build, so an
+    // unrecognised exe must stop here. g_patched is latched only after this check, so a rejected
+    // build can still be retried in-process.
+    if (!PatchChecksumComparisons_Precomputed())
+    {
+        return;
+    }
+
+    g_patched = true;
 
     // Apply VMP Hooks
     hooks::ApplyVMTHooks();
@@ -500,9 +562,10 @@ void RunPatching()
 	hooks::ApplyMemoryPatches();
 
 	// Apply Exception Handler
-    InstallHook(ExceptHook);
+    Protection::ExceptionHookInstalled = InstallHook(ExceptHook);
 
-	// Install the protection hooks
+	// Install the protection hooks. install() checks the flag above because it arms a fault-driven
+	// hook that would hard-crash on the first lobby message with no handler installed.
     Protection::install();
 }
 
@@ -513,6 +576,10 @@ EXPORT void EnableInjectorlessInstall() // must be called BEFORE loading the pat
 
 EXPORT void zbr_run_gamemode_lui(const char* input)
 {
+    if (!input)
+    {
+        return;
+    }
 
     if (CONST32("serious_anticrash_2023") == GSCUHashing::canon_hash(input))
     {
@@ -523,64 +590,93 @@ EXPORT void zbr_run_gamemode_lui(const char* input)
 
 EXPORT void Unload()
 {
-    HANDLE hThreadSnap = INVALID_HANDLE_VALUE;
-    THREADENTRY32 te32;
+    Protection::Unloading = true;
 
-    hThreadSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    te32.dwSize = sizeof(THREADENTRY32);
+    std::vector<DWORD> suspendedThreadIds;
+    // Reserved up front so push_back cannot allocate inside the loop below: by then every other
+    // thread is suspended, and one of them may hold the process heap lock.
+    suspendedThreadIds.reserve(1024);
 
-    if (Thread32First(hThreadSnap, &te32))
+    HANDLE hThreadSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+
+    if (hThreadSnap != INVALID_HANDLE_VALUE)
     {
-        do
-        {
-            if (te32.th32OwnerProcessID == GetCurrentProcessId() && te32.th32ThreadID != GetCurrentThreadId())
-            {
-                auto hThread = OpenThread(THREAD_ALL_ACCESS, false, te32.th32ThreadID);
+        THREADENTRY32 te32{};
+        te32.dwSize = sizeof(THREADENTRY32);
 
-                if (hThread)
+        if (Thread32First(hThreadSnap, &te32))
+        {
+            do
+            {
+                if (te32.th32OwnerProcessID == GetCurrentProcessId() && te32.th32ThreadID != GetCurrentThreadId())
                 {
-                    SuspendThread(hThread);
-                    CONTEXT tContext{};
-                    tContext.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-                    if (GetThreadContext(hThread, &tContext))
+                    auto hThread = OpenThread(THREAD_ALL_ACCESS, false, te32.th32ThreadID);
+
+                    if (hThread)
                     {
-                        tContext.Dr7 = 0;
+                        // Past the reserve above, leave the thread running rather than reallocate
+                        // with everything else suspended.
+                        if (suspendedThreadIds.size() == suspendedThreadIds.capacity())
+                        {
+                            CloseHandle(hThread);
+                            continue;
+                        }
+
+                        if (SuspendThread(hThread) != (DWORD)-1)
+                        {
+                            suspendedThreadIds.push_back(te32.th32ThreadID);
+                        }
+
+                        CONTEXT tContext{};
                         tContext.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-                        SetThreadContext(hThread, &tContext);
+                        if (GetThreadContext(hThread, &tContext))
+                        {
+                            tContext.Dr7 = 0;
+                            tContext.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+                            SetThreadContext(hThread, &tContext);
+                        }
+                        CloseHandle(hThread);
                     }
-                    CloseHandle(hThread);
                 }
-            }
-        } while (Thread32Next(hThreadSnap, &te32));
+            } while (Thread32Next(hThreadSnap, &te32));
+        }
+
+        CloseHandle(hThreadSnap);
     }
 
-    CloseHandle(hThreadSnap);
-
     Protection::uninstall();
+    hooks::RemoveVMTHooks();
     is_unhooking = true;
     UninstallHook();
 
-    hThreadSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    te32.dwSize = sizeof(THREADENTRY32);
-
-    if (Thread32First(hThreadSnap, &te32))
+    for (auto threadId : suspendedThreadIds)
     {
-        do
-        {
-            if (te32.th32OwnerProcessID == GetCurrentProcessId() && te32.th32ThreadID != GetCurrentThreadId())
-            {
-                auto hThread = OpenThread(THREAD_ALL_ACCESS, false, te32.th32ThreadID);
+        auto hThread = OpenThread(THREAD_ALL_ACCESS, false, threadId);
 
-                if (hThread)
-                {
-                    ResumeThread(hThread);
-                    CloseHandle(hThread);
-                }
-            }
-        } while (Thread32Next(hThreadSnap, &te32));
+        if (hThread)
+        {
+            ResumeThread(hThread);
+            CloseHandle(hThread);
+        }
     }
 
-    CloseHandle(hThreadSnap);
+    // Join before the detours come out. No timeout: Unloading is set above and MainThread's loop is
+    // bounded by a 1s Sleep, and giving up early would let FreeLibrary run with the thread still in
+    // the module.
+    if (Protection::MainThreadHandle)
+    {
+        WaitForSingleObject(Protection::MainThreadHandle, INFINITE);
+        CloseHandle(Protection::MainThreadHandle);
+        Protection::MainThreadHandle = nullptr;
+    }
+
+    // After the resume, not before: MH_DisableHook allocates and freezes threads itself, so running
+    // it while every other thread is suspended can deadlock on the process heap lock.
+    hooks::DestroyHooks();
+
+    // Cleared so a launcher can reload the patch in place; otherwise the guard stays latched and a
+    // later zbr_run_gamemode_lui is a silent no-op.
+    g_patched = false;
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule,
