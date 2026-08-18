@@ -17,12 +17,10 @@ namespace hooks {
 		}
 
 		bool hkLiveInventory_AreExtraSlotsPurchased(ControllerIndex_t controllerIndex) {
-		
-			if (SPOOF_UNLOCK_ALL == true) return 999;
-			
-				return true;
 
-			return LiveInventory_AreExtraSlotsPurchased(controllerIndex);
+			// Always true, matching shipped 3.03+ behaviour: a stray `return true` already made the
+			// call to the original unreachable. Do not "restore" that call.
+			return true;
 		}
 
 		const char* hkInfo_ValueForKey(char* a1, __int64 a2)
@@ -38,13 +36,18 @@ namespace hooks {
 			return true;
 		}
 
+		// Incentive ids with no content behind them (24 cwl_mtx, 29 unavailable, 34 duplicate
+		// stpatrick_04). Reporting them as owned is what renders the blank CWL calling cards.
+		static bool is_broken_incentive(int incentiveId)
+		{
+			return incentiveId == 24 || incentiveId == 29 || incentiveId == 34;
+		}
+
 		bool hkLiveEntitlements_IsEntitlementActiveForController(ControllerIndex_t controllerIndex, int incentiveId) {
 
-			if (SPOOF_UNLOCK_ALL == true) return 999;
-				return true; 
+			if (is_broken_incentive(incentiveId)) return false;
 
-
-			return LiveEntitlements_IsEntitlementActiveForController(controllerIndex, incentiveId);
+			return true;
 		}
 
 
@@ -145,25 +148,30 @@ namespace hooks {
 
 		bool hkLive_UserGetName(ControllerIndex_t controllerIndex, char* buf, int bufSize) {
 
-			__int64 v3; // rbx
-			int* v6; // rax
-			int v9; // [rsp+40h] [rbp+8h] BYREF
+			if (!buf || bufSize <= 0)
+			{
+				return 0;
+			}
 
-			v3 = bufSize;
-			v9 = bufSize;
 			Memset(buf, 0i64, bufSize);
-			v6 = &v9;
-
-			Live_Base_UserGetName((UINT8*)buf, *v6, 1);
+			Live_Base_UserGetName((UINT8*)buf, bufSize, 1);
 
 			return 1;
 		}
 
 		float hkflsomeWeirdCharacterIndex(__int64 a1, int a2, int a3) {
 
-			__int64 v3; // r9
+			if (!a1 || a2 < 0) {
+				return -1.0f;
+			}
 
-			v3 = *(DWORD64*)(a1 + 24i64 * a2 + 56);
+			auto slot = (DWORD64*)(a1 + 24i64 * a2 + 56);
+			if (Protection::IsBadReadPtr(slot) || Protection::IsBadReadPtr((char*)slot + 7)) {
+				return -1.0f; // matches this hook's own fallthrough below
+			}
+
+			__int64 v3 = *slot; // r9
+
 			if (v3) {
 				return flsomeWeirdCharacterIndex(a1, a2, a3);
 			}
@@ -178,10 +186,17 @@ namespace hooks {
 			auto v8 = *v7;
 			auto message = **(CHAR***)&v7[2 * v8 + 34];
 
+			if (!message)
+			{
+				return 1;
+			}
+
 			// From v2.04
 			auto mode = Com_SessionMode_GetModeName();
 
-			if ((!Protection::I_stricmp(message, "requeststats") || !Protection::I_stricmp(message, "requeststats\n")) && !Protection::I_stricmp(mode, "CP"))
+			// mode can be null, and testing it first short-circuits before the message comparisons.
+			if (mode && !Protection::I_stricmp(mode, "CP")
+				&& (!Protection::I_stricmp(message, "requeststats") || !Protection::I_stricmp(message, "requeststats\n")))
 			{
 				return CL_ConnectionlessCMD(clientNum, from, msg);
 			}
@@ -198,8 +213,11 @@ namespace hooks {
 		{
 
 			constexpr auto mspreload_command = "mspreload";
-			std::vector<int> config_strings = { 3514, 3627 };
+			// static: this hook is on a per-frame path, so the list must not be rebuilt per call.
+			static const std::vector<int> config_strings = { 3514, 3627 };
 
+			// Campaign bypass from 859c4aa, left as written. Do not narrow it: the store below is
+			// all this hook does and it is skipped in CP either way, so there is nothing to gain.
 			auto mode = Com_SessionMode_GetModeName();
 			if (mode && !Protection::I_stricmp(mode, "CP"))
 			{
@@ -208,7 +226,8 @@ namespace hooks {
 
 			if (is_in_number_array(configStringIndex, config_strings))
 			{
-				if (auto config_string{ CL_GetConfigString(configStringIndex) }; is_equal(config_string, mspreload_command, std::strlen(mspreload_command), false))
+				if (auto config_string{ CL_GetConfigString(configStringIndex) };
+					config_string && is_equal(config_string, mspreload_command, std::strlen(mspreload_command), false))
 				{
 					// Loadside attempt caught, return empty string to prevent crash
 					CL_StoreConfigString(configStringIndex, "");
@@ -242,6 +261,7 @@ namespace hooks {
 				translatedString = "";
 			}
 
+			// Returning 0 for an over-long string is shipped behaviour; leave it alone, as no caller
 			if (strlen(translatedString) > 4095)
 			{
 				return 0;
@@ -311,8 +331,6 @@ namespace hooks {
 		{
 			if (size < 0)
 			{
-				*dest = 0;
-				*source = 0;
 				return 0;
 			}
 			return qmemcpy(dest, source, size);
@@ -320,9 +338,13 @@ namespace hooks {
 
 		bool hkUI_DoModelStringReplacement(__int32 controllerIndex, char* element, const char* source, char* dest, unsigned int destSize)
 		{
+			if (!dest || !destSize)
+			{
+				return false;
+			}
+
 			char input[4096]{};
-			strcpy_s(input, source);
-			input[4095] = 0;
+			strncpy_s(input, source ? source : "", _TRUNCATE);
 			int max = strlen(input);
 
 			bool b_replace = false;
@@ -361,8 +383,7 @@ namespace hooks {
 
 			if (b_replace)
 			{
-				strcpy_s(dest, destSize, input);
-				*(dest + destSize - 1) = 0;
+				strncpy_s(dest, destSize, input, _TRUNCATE);
 				return true;
 			}
 
@@ -444,7 +465,12 @@ namespace hooks {
 			{
 				return Live_SystemInfo(controllerIndex, infoType, outputString, outputLen);
 			}
-			strcpy_s(outputString, outputLen, ZBR_VERSION_FULL);
+			if (!outputString || outputLen <= 0)
+			{
+				return false;
+			}
+
+			strncpy_s(outputString, outputLen, ZBR_VERSION_FULL, _TRUNCATE);
 			return true;
 		}
 
@@ -467,30 +493,18 @@ namespace hooks {
 				packetType = MSG_ReadByte(&msg);
 			}
 
-			char* msgData = *(char**)(message + 8);
-			__int32 msgSize = *(__int32*)(message + 0x1C);
-			__int32 msgRead = *(__int32*)(message + 0x24);
-			const auto remainingSize = msgSize - msgRead;
-
 			// check packet for the following cases:
 			if (packetType == 0x65 || packetType == 0x6D) // cbuf
 			{
 				is_valid_packet = false;
 			}
 			else if (packetType == 0x66) // is a joinRequest
-			{		
-				if ((msgSize - msgRead) != 0x64) // has a bad message size which leads to error message
-				{
-					is_valid_packet = false;
-				}
-
-				char* packetData = msgData + msgRead;
-				if (is_valid_packet && !*(__int32*)packetData) // msg_type_join_request which leads to crash
-				{
-					is_valid_packet = false;
-				}
+			{
+				is_valid_packet = false;
 			}
 
+			ZLOG("dispatch: type=0x%02X valid=%d xuid=%p size=%u",
+				packetType, (int)is_valid_packet, (void*)senderXuid, messageSize);
 			if (is_valid_packet && (packetType == 0x68) && Protection::CheckPendingInfoRequests(senderXuid, (msg_t*)message))
 			{
 				return 0;
@@ -542,7 +556,7 @@ namespace hooks {
 		{
 			if (LobbyMsgRW_PrepWriteMsg(lobbyMsg, data, length, msgType))
 			{
-				// ALOG("sending pkt %d", msgType);
+
 				if (ZBR_PREFIX_BYTE)
 				{
 					((void(__fastcall*)(__int64, unsigned char))PTR_MSG_WriteByte)(lobbyMsg, ZBR_PREFIX_BYTE);
@@ -555,13 +569,41 @@ namespace hooks {
 
 		bool hkLobbyMsgRW_PrepReadMsg(__int64 lm)
 		{
-			if (LobbyMsgRW_PrepReadMsg(lm) && (!ZBR_PREFIX_BYTE || ((((unsigned char(__fastcall*)(__int64))PTR_MSG_ReadByte)(lm) == ZBR_PREFIX_BYTE) && (((unsigned char(__fastcall*)(__int64))PTR_MSG_ReadByte)(lm) == ZBR_PREFIX_BYTE2)) ))
+			if (!LobbyMsgRW_PrepReadMsg(lm))
 			{
-				// ALOG("valid pkt %d", *(__int32*)(lm + 0x38));
 				return true;
 			}
 
-			return true;
+			// No password means no prefix was written, so there is nothing to check.
+			if (!ZBR_PREFIX_BYTE)
+			{
+				return true;
+			}
+
+			// Read both bytes unconditionally: short-circuiting on the first would consume only one
+			// and leave the read cursor misaligned.
+			const unsigned char wirePrefix1 = ((unsigned char(__fastcall*)(__int64))PTR_MSG_ReadByte)(lm);
+			const unsigned char wirePrefix2 = ((unsigned char(__fastcall*)(__int64))PTR_MSG_ReadByte)(lm);
+
+			if (wirePrefix1 == ZBR_PREFIX_BYTE && wirePrefix2 == ZBR_PREFIX_BYTE2)
+			{
+				return true;
+			}
+
+			// Grace window, as in hkSys_VerifyPacketChecksum: peers rotate the password at
+			// unsynchronised moments, so briefly accept the previous one. PrivatePassword[0] holds
+			// it, [2] is the rotation time
+			const unsigned char prevPrefix1 = (unsigned char)((Protection::PrivatePassword[0] & 0xFF0000) >> 16);
+			const unsigned char prevPrefix2 = (unsigned char)((Protection::PrivatePassword[0] & 0xFF000000) >> 24);
+
+			if (prevPrefix1
+				&& GetTickCount64() <= (unsigned __int64)Protection::PrivatePassword[2] + 1500
+				&& wirePrefix1 == prevPrefix1 && wirePrefix2 == prevPrefix2)
+			{
+				return true;
+			}
+
+			return false;
 		}
 
 		bool hkLobbyMsgRW_PackageInt(LobbyMsg* lobbyMsg, const char* key, __int32* val)
@@ -573,10 +615,18 @@ namespace hooks {
 			{
 				if (*val < 0 || *val > 1)
 				{
-					//XLOG("DROP LOBBYTYPE");
 					return false;
 				}
 			}
+
+			// The inspectors are best-effort reimplementations of the game's parsers: a failure
+			// there means "could not model this message", not "malformed packet", and propagating
+			// it drops legitimate join traffic. The game's own calls get the real result.
+			if (Protection::InspectorDepth > 0)
+			{
+				return true;
+			}
+
 			return result;
 		}
 
@@ -646,7 +696,8 @@ namespace hooks {
 				}
 				else
 				{
-					strcpy_s(szMenuName, BG_Cache_GetScriptMenuNameForIndex(0, menuIndex));
+					const char* menuName = BG_Cache_GetScriptMenuNameForIndex(0, menuIndex);
+					strncpy_s(szMenuName, menuName ? menuName : "", _TRUNCATE);
 				}
 				SV_Cmd_ArgvBuffer(3, mres, 1024);
 			}
@@ -715,11 +766,22 @@ namespace hooks {
 				}
 				else
 				{
-					strcpy_s(szMenuName, BG_Cache_GetScriptMenuNameForIndex(0, menuIndex));
+					const char* menuName = BG_Cache_GetScriptMenuNameForIndex(0, menuIndex);
+					strncpy_s(szMenuName, menuName ? menuName : "", _TRUNCATE);
 				}
 				SV_Cmd_ArgvBuffer(3, mres, 1024);
 				auto eventIndex = (unsigned int)atoi(mres);
-				strcpy_s(mres, BG_Cache_GetEventStringNameForIndex(0, eventIndex));
+				// eventIndex comes off the wire and the table has 256 entries; "bad" is the
+				// sentinel this function already uses for unusable input.
+				if (eventIndex >= 256u)
+				{
+					strcpy_s(mres, "bad");
+				}
+				else
+				{
+					const char* eventName = BG_Cache_GetEventStringNameForIndex(0, eventIndex);
+					strncpy_s(mres, eventName ? eventName : "", _TRUNCATE);
+				}
 			}
 
 			if (!Protection::I_stricmp(mres, "badspawn"))
@@ -868,63 +930,107 @@ namespace hooks {
 		}				
 	}
 
+	// The object's vptr slot and the game's real vtable address, so unload can restore it.
+	static uintptr_t* g_lobbyVptrSlot = nullptr;
+	static uintptr_t g_origLobbyVtable = 0;
+
 	void ApplyVMTHooks()
 	{
-
+		// Redirect this object's vptr to a private copy of the vtable and patch the copy. Never
+		// write the game's own vtable: it sits in Arxan-checksummed read-only data, and patching
+		// slot 24 in place derailed execution to a bogus address on the lobby path.
 		auto ptr = *(uintptr_t*)DW_LOBBY;
-		auto vmt = **(uintptr_t***)(ptr + 1384);
+		if (!ptr)
+		{
+			return;
+		}
+
+		auto vptrSlot = *(uintptr_t**)(ptr + 1384);
+		if (!vptrSlot)
+		{
+			return;
+		}
+
+		auto vmt = (uintptr_t*)*vptrSlot;
+		if (!vmt)
+		{
+			return;
+		}
 
 		auto vtable_buf = new uintptr_t[50];
-		for (auto count = 0; count < 50; ++count) {
+		for (auto count = 0; count < 50; ++count)
+		{
 			vtable_buf[count] = vmt[count];
 		}
 
-		**(uintptr_t**)(ptr + 1384) = (uintptr_t)vtable_buf;
-		*(uintptr_t*)(**(uintptr_t**)(ptr + 1384) + 192) = (uintptr_t)functions::Global_InstantMessage;
+		vtable_buf[24] = (uintptr_t)functions::Global_InstantMessage;
 
+		g_lobbyVptrSlot = vptrSlot;
+		g_origLobbyVtable = (uintptr_t)vmt;
+		*vptrSlot = (uintptr_t)vtable_buf;
+	}
+
+	void RemoveVMTHooks()
+	{
+		if (!g_lobbyVptrSlot || !g_origLobbyVtable)
+		{
+			return;
+		}
+
+		// Point the object back at the game's real vtable, otherwise unloading leaves it
+		// dispatching through a table in a freed module. The slot is in the game's own object,
+		// not its read-only image, so no VirtualProtect is needed.
+		*g_lobbyVptrSlot = g_origLobbyVtable;
+
+		// The copy is leaked deliberately: 400 bytes once per process, and another thread may
+		// still be inside a call dispatched through it.
+		g_lobbyVptrSlot = nullptr;
+		g_origLobbyVtable = 0;
+	}
+
+	// Skips the write if VirtualProtect fails, rather than writing anyway as 3.04 did: these are
+	// hardcoded RVAs and this runs before the exception handler is installed, so a write to an
+	// unmapped address is an unrecoverable startup crash. Callers discard the result
+	static bool patch_bytes(void* address, const void* bytes, size_t size)
+	{
+		DWORD oldProtect = 0;
+		if (!VirtualProtect(address, size, PAGE_EXECUTE_READWRITE, &oldProtect))
+		{
+			return false;
+		}
+
+		memcpy(address, bytes, size);
+		FlushInstructionCache(GetCurrentProcess(), address, size);
+
+		DWORD dummy = 0;
+		VirtualProtect(address, size, oldProtect, &dummy);
+		return true;
 	}
 
 	void ApplyMemoryPatches()
 	{
-		auto OldProtection = 0ul;
-		// SL fix (nop out the calls to com_error)
-		VirtualProtect((__int32*)REBASE(0x1964766), 5, PAGE_EXECUTE_READWRITE, &OldProtection);
-		*(__int32*)REBASE(0x1964766) = 0x90909090;
-		*(char*)(REBASE(0x1964766) + 4) = 0x90;
-		VirtualProtect((__int32*)REBASE(0x1964766), 5, OldProtection, &OldProtection);
+		static const unsigned char nop5[5] = { 0x90, 0x90, 0x90, 0x90, 0x90 };
+		static const unsigned char movzx_word = 0xB7; // 0F BF movsx r32,r/m16 -> 0F B7 movzx
+		static const unsigned char movzx_byte = 0xB6; // 0F BE movsx r32,r/m8  -> 0F B6 movzx
+		static const unsigned char token_limit = 0x2F;
+		static const __int32 above_normal = 0x00008000;
 
 		// SL fix (nop out the calls to com_error)
-		VirtualProtect((__int32*)REBASE(0x19646A7), 5, PAGE_EXECUTE_READWRITE, &OldProtection);
-		*(__int32*)REBASE(0x19646A7) = 0x90909090;
-		*(char*)(REBASE(0x19646A7) + 4) = 0x90;
-		VirtualProtect((__int32*)REBASE(0x19646A7), 5, OldProtection, &OldProtection);
+		patch_bytes((void*)REBASE(0x1964766), nop5, sizeof(nop5));
+		patch_bytes((void*)REBASE(0x19646A7), nop5, sizeof(nop5));
 
-		VirtualProtect((__int32*)REBASE(0x1EEACF2), 4, PAGE_EXECUTE_READWRITE, &OldProtection);
-		*(char*)REBASE(0x1EEACF2 + 1) = 0xB7; // fix movsx issue with package readglob
-		VirtualProtect((__int32*)REBASE(0x1EEACF2), 4, OldProtection, &OldProtection);
+		// fix movsx issue with package readglob
+		patch_bytes((void*)REBASE(0x1EEACF2 + 1), &movzx_word, 1);
 
-		VirtualProtect((__int32*)PTR_Cmp_TokenizeStringInternal, 1, PAGE_EXECUTE_READWRITE, &OldProtection);
-		*(char*)PTR_Cmp_TokenizeStringInternal = 0x2F;
-		VirtualProtect((__int32*)PTR_Cmp_TokenizeStringInternal, 1, OldProtection, &OldProtection);
+		patch_bytes((void*)PTR_Cmp_TokenizeStringInternal, &token_limit, 1);
 
-		// process priority
-		VirtualProtect((__int32*)REBASE(0x22BC1CD), 4, PAGE_EXECUTE_READWRITE, &OldProtection);
-		*(__int32*)REBASE(0x22BC1CD) = 0x00008000; // above normal
-		VirtualProtect((__int32*)REBASE(0x22BC1CD), 4, OldProtection, &OldProtection);
-
-		VirtualProtect((__int32*)REBASE(0x22BC1D2), 4, PAGE_EXECUTE_READWRITE, &OldProtection);
-		*(__int32*)REBASE(0x22BC1D2) = 0x00008000; // above normal
-		VirtualProtect((__int32*)REBASE(0x22BC1D2), 4, OldProtection, &OldProtection);
+		// process priority: above normal
+		patch_bytes((void*)REBASE(0x22BC1CD), &above_normal, sizeof(above_normal));
+		patch_bytes((void*)REBASE(0x22BC1D2), &above_normal, sizeof(above_normal));
 
 		// movsx -> movzx
-		VirtualProtect((__int32*)REBASE(0x1F21EF8), 1, PAGE_EXECUTE_READWRITE, &OldProtection);
-		*(char*)REBASE(0x1F21EF8) = 0xb6;
-		VirtualProtect((__int32*)REBASE(0x1F21EF8), 1, OldProtection, &OldProtection);
-
-		// movsx -> movzx
-		VirtualProtect((__int32*)REBASE(0x1CA4C84), 1, PAGE_EXECUTE_READWRITE, &OldProtection);
-		*(char*)REBASE(0x1CA4C84) = 0xb6;
-		VirtualProtect((__int32*)REBASE(0x1CA4C84), 1, OldProtection, &OldProtection);
+		patch_bytes((void*)REBASE(0x1F21EF8), &movzx_byte, 1);
+		patch_bytes((void*)REBASE(0x1CA4C84), &movzx_byte, 1);
 	}
 
 	void ApplyHooks()
@@ -982,6 +1088,7 @@ namespace hooks {
 	void DestroyHooks()
 	{
 		MH_DisableHook(MH_ALL_HOOKS);
+		RemoveVMTHooks();
 	}
 
 }
