@@ -290,8 +290,9 @@ void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
         const LONG self = (LONG)GetCurrentThreadId();
         if (InterlockedCompareExchange(&g_crashDumpOwnerTid, self, 0) != 0)
         {
-            INT64 addy = (INT64)ExceptionRecord->ExceptionAddress;
-            SavedExceptions[addy] = *ContextRecord;
+            // Deliberately records nothing. The owning thread is iterating SavedExceptions and
+            // erasing as it goes, so inserting here rehashes the map under its iterator. An
+            // unsynchronised insert against a concurrent iterate/erase, which corrupts the heap
         }
         else
         {
@@ -440,7 +441,7 @@ bool InstallHook(void* func)
             (void*)kiuserexceptiondispatcher, *(__int32*)kiuserexceptiondispatcher);
         if (*(__int32*)kiuserexceptiondispatcher == 0x58B48FC)
         {
-            auto distance = *(DWORD*)(kiuserexceptiondispatcher + 4);
+            auto distance = *(__int32*)(kiuserexceptiondispatcher + 4);
             auto ptr = (kiuserexceptiondispatcher + 8) + distance;
             g_exceptionDispatchSlot = ptr;
             g_exceptionDispatchOriginal = *reinterpret_cast<void**>(ptr);
@@ -494,31 +495,24 @@ void UninstallHook()
 
     auto kiuserexceptiondispatcher = g_kiUserExceptionDispatcher;
 
-    if (kiuserexceptiondispatcher)
+    if (g_exceptionDispatchSlot)
     {
-        if (*(__int32*)kiuserexceptiondispatcher == 0x58B48FC)
-        {
-            if (g_exceptionDispatchSlot)
-            {
-                auto ptr = g_exceptionDispatchSlot;
-                auto OldProtection = 0ul;
-                VirtualProtect(reinterpret_cast<void*>(ptr), 8, PAGE_EXECUTE_READWRITE, &OldProtection);
-                *reinterpret_cast<void**>(ptr) = g_exceptionDispatchOriginal;
-                VirtualProtect(reinterpret_cast<void*>(ptr), 8, OldProtection, &OldProtection);
-                g_exceptionDispatchSlot = 0;
-                g_exceptionDispatchOriginal = nullptr;
-            }
-        }
-        else if (*(__int32*)kiuserexceptiondispatcher == 0x248C8B48)
-        {
-            if (wine_hook_installed)
-            {
-                wine_uninstallhook(kiuserexceptiondispatcher);
-                wine_hook_installed = false;
-            }
-        }
+        auto ptr = g_exceptionDispatchSlot;
+        auto OldProtection = 0ul;
+        VirtualProtect(reinterpret_cast<void*>(ptr), 8, PAGE_EXECUTE_READWRITE, &OldProtection);
+        *reinterpret_cast<void**>(ptr) = g_exceptionDispatchOriginal;
+        VirtualProtect(reinterpret_cast<void*>(ptr), 8, OldProtection, &OldProtection);
+        g_exceptionDispatchSlot = 0;
+        g_exceptionDispatchOriginal = nullptr;
     }
 
+    if (wine_hook_installed && kiuserexceptiondispatcher)
+    {
+        wine_uninstallhook(kiuserexceptiondispatcher);
+        wine_hook_installed = false;
+    }
+
+    is_unhooking = false;
     Protection::ExceptionHookInstalled = false;
 }
 
@@ -537,8 +531,12 @@ void RunPatching()
     const MH_STATUS initStatus = MH_Initialize();
     if (initStatus != MH_OK)
     {
-        // Every hook below depends on this, so nothing installs if it fails.
-        ZLOG("hook: MH_Initialize FAILED (MH_STATUS=%d)", (int)initStatus);
+        // Every detour depends on this, so stop rather than continue. Carrying on installs the
+        // exception hook, the memory patches and the lobbymsgprints sentinel while every
+        // MH_CreateHook below fails. A session with the sentinel armed and no packet validation
+        // at all. g_patched is not set, so this can be retried in-process.
+        ZLOG("hook: MH_Initialize FAILED (MH_STATUS=%d) not installing", (int)initStatus);
+        return;
     }
 
 	// Set a default player name if none is set
