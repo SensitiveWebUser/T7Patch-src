@@ -28,7 +28,7 @@ BEGIN
             VALUE "FileVersion",      T7PATCH_VERSION_STR
             VALUE "InternalName",     "T7Patch"
             VALUE "LegalCopyright",   "Copyright (C) 2026 serious and the T7Patch contributors"
-            VALUE "OriginalFilename", "T7Patch.dll"
+            VALUE "OriginalFilename", "t7patch.dll"
             VALUE "ProductName",      "T7Patch"
             VALUE "ProductVersion",   T7PATCH_PRODUCTVERSION_STR
         END
