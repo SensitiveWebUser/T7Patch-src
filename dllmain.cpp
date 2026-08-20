@@ -534,7 +534,12 @@ void RunPatching()
     SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
 
 	// Initialize MinHook
-    MH_Initialize();
+    const MH_STATUS initStatus = MH_Initialize();
+    if (initStatus != MH_OK)
+    {
+        // Every hook below depends on this, so nothing installs if it fails.
+        ZLOG("hook: MH_Initialize FAILED (MH_STATUS=%d)", (int)initStatus);
+    }
 
 	// Set a default player name if none is set
     if (!*Protection::CustomName) { snprintf(Protection::CustomName, 16, "Unknown Soldier"); }
@@ -587,6 +592,7 @@ EXPORT void zbr_run_gamemode_lui(const char* input)
 
 EXPORT void Unload()
 {
+    ZLOG("unload: begin");
     Protection::Unloading = true;
 
     std::vector<DWORD> suspendedThreadIds;

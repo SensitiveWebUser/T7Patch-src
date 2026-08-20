@@ -21,6 +21,7 @@
 #include <cstdarg>
 #include <cstring>
 #include <cstdio>
+#include <atomic>
 #include <TlHelp32.h>
 #include "structs.h"
 #include "minhook/include/MinHook.h"
@@ -149,7 +150,11 @@ inline std::vector<std::string> legit_packets = {
 // Off unless t7patch.conf contains `debuglog=1`.
 #define ZBR_TRACE_NAME "t7patch_trace.log"
 
-inline bool g_trace_enabled = false;
+inline std::atomic<bool> g_trace_enabled{ false };
+
+// Rotated to .1 rather than truncated once past this, so a long session cannot fill the disk
+// and the run before the current one survives.
+#define ZBR_TRACE_MAX_BYTES (16 * 1024 * 1024)
 
 // Opens and closes the file per line instead of holding a handle. That is slow
 // and deliberate: a fault here ends in SuspendProcess, and the value of this log
@@ -181,11 +186,23 @@ inline void zbr_trace(const char* fmt, ...)
 		GetLocalTime(&t);
 
 		AcquireSRWLockExclusive(&lock);
-		if (FILE* f = fopen(ZBR_TRACE_NAME, "a"))
+		FILE* traceFile = fopen(ZBR_TRACE_NAME, "a");
+		if (traceFile)
 		{
-			fprintf(f, "%02u:%02u:%02u.%03u t%-5lu %s\n",
+			fseek(traceFile, 0, SEEK_END);
+			if (ftell(traceFile) >= ZBR_TRACE_MAX_BYTES)
+			{
+				fclose(traceFile);
+				remove(ZBR_TRACE_NAME ".1");
+				rename(ZBR_TRACE_NAME, ZBR_TRACE_NAME ".1");
+				traceFile = fopen(ZBR_TRACE_NAME, "a");
+			}
+		}
+		if (traceFile)
+		{
+			fprintf(traceFile, "%02u:%02u:%02u.%03u t%-5lu %s\n",
 				t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, GetCurrentThreadId(), line);
-			fclose(f);
+			fclose(traceFile);
 		}
 		ReleaseSRWLockExclusive(&lock);
 	}
@@ -194,7 +211,7 @@ inline void zbr_trace(const char* fmt, ...)
 }
 
 // Tested at the call site so arguments are not evaluated while logging is off.
-#define ZLOG(...) do { if (g_trace_enabled) { zbr_trace(__VA_ARGS__); } } while (0)
+#define ZLOG(...) do { if (g_trace_enabled.load(std::memory_order_relaxed)) { zbr_trace(__VA_ARGS__); } } while (0)
 #define ZBR_WINDOW_TEXT "Call of Duty: Black Ops III (community patch by serious)"
 #define ZBR_VERSION_FULL "Patch 3.05 - by serious <3"
 #define SPOOF_UNLOCK_ALL false

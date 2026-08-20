@@ -146,6 +146,8 @@ bool PatchChecksumComparisons_Precomputed()
 			"  EntryPoint:    0x%08X",
 			timeDateStamp, sizeOfImage, entryPoint);
 
+		ZLOG("arxan: UNSUPPORTED BUILD - patches NOT applied. TimeDateStamp=%08X SizeOfImage=%08X EntryPoint=%08X",
+			timeDateStamp, sizeOfImage, entryPoint);
 		MessageBoxA(nullptr, message, "T7Patch",
 			MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND);
 		return false;

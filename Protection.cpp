@@ -181,6 +181,7 @@ SD(addrbuff)
 EXPORT void SetFriendsOnly(bool isFriendsOnly)
 {
     Protection::IsFriendsOnly = isFriendsOnly;
+    ZLOG("cfg: friendsOnly=%d", (int)isFriendsOnly);
 }
 
 EXPORT void SetPlayerName(const char* name)
@@ -207,6 +208,8 @@ EXPORT void SetNetworkPassword(const char* pass)
     {
         Protection::SetNetworkPassword(GSCUHashing::canon_hash64(pass));
     }
+    ZLOG("cfg: password %s, prefix=%02X,%02X", (pass && *pass) ? "SET" : "cleared",
+        ZBR_PREFIX_BYTE, ZBR_PREFIX_BYTE2);
 }
 
 IHOOK_HEADER(IsProcessorFeaturePresent, BOOL, (DWORD processorFeature))
@@ -233,17 +236,20 @@ bool Protection::ReadP2PPacket(uintptr_t thisptr, void* pub_dest, unsigned int c
         if (game_im == 104) // info request
         {
             if (Protection::IsFriendsOnly && !Protection::IsFriendByXUIDUncached(*steam_id_remote)) {
+                ZLOG("p2p: DROP infoReq from non-friend xuid=%p", (void*)*steam_id_remote);
                 return false;
             }
         }
 
         if (game_im == 102) // join request
         {
+            ZLOG("p2p: DROP joinRequest (game_im=102) xuid=%p", (void*)*steam_id_remote);
             return false;
         }
 
         if (game_im == 101 || game_im == 109) // cbuf
         {
+            ZLOG("p2p: DROP cbuf (game_im=%d) xuid=%p", (int)game_im, (void*)*steam_id_remote);
             return false;
         }
     }
@@ -845,10 +851,11 @@ patch_config user_config;
 
 void apply_settings()
 {
+    g_trace_enabled.store(user_config.debuglog != 0, std::memory_order_relaxed);
+    ZLOG("cfg: applying t7patch.conf");
     SetPlayerName(user_config.playername);
     SetFriendsOnly(user_config.isfriendsonly);
     SetNetworkPassword(user_config.networkpassword);
-    g_trace_enabled = user_config.debuglog != 0;
 }
 
 DWORD WINAPI MainThread(LPVOID lpParam)
@@ -1253,6 +1260,10 @@ void Protection::install()
     ZLOG("install done: hooked=%d oldPrints=%p retnAddy=%p ZwContinue=%p",
         (int)Protection::ExceptionHookInstalled, (void*)Protection::Old_lobbymsgprints,
         (void*)Protection::CachedRetnAddy, (void*)(uintptr_t)Protection::ZwContinue);
+    ZLOG("session: %s | route=%s | name=\"%s\" | friendsOnly=%d | prefix=%02X,%02X",
+        ZBR_VERSION_FULL, Protection::IsInjectorlessInstall ? "injectorless" : "injector",
+        Protection::CustomName, (int)Protection::IsFriendsOnly,
+        ZBR_PREFIX_BYTE, ZBR_PREFIX_BYTE2);
     Protection::Installed = true;
 }
 
