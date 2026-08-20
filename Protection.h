@@ -181,3 +181,8 @@ fn_return WINAPI __ ## fn_name fn_args
 
 #define ZBR_PREFIX_BYTE ((unsigned char)((Protection::PrivatePassword[1] & 0xFF0000) >> 16))
 #define ZBR_PREFIX_BYTE2 ((unsigned char)((Protection::PrivatePassword[1] & 0xFF000000) >> 24))
+
+#define ZBR_INJECTOR_PASSWORD_MAXLEN 15u
+
+#define ZBR_HAS_PASSWORD (Protection::PrivatePassword[1] != 0)
+#define ZBR_HAS_PREV_PASSWORD (Protection::PrivatePassword[0] != 0)

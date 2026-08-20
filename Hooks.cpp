@@ -560,7 +560,7 @@ namespace hooks {
 			if (LobbyMsgRW_PrepWriteMsg(lobbyMsg, data, length, msgType))
 			{
 
-				if (ZBR_PREFIX_BYTE)
+				if (ZBR_HAS_PASSWORD)
 				{
 					((void(__fastcall*)(__int64, unsigned char))PTR_MSG_WriteByte)(lobbyMsg, ZBR_PREFIX_BYTE);
 					((void(__fastcall*)(__int64, unsigned char))PTR_MSG_WriteByte)(lobbyMsg, ZBR_PREFIX_BYTE2);
@@ -578,7 +578,7 @@ namespace hooks {
 			}
 
 			// No password means no prefix was written, so there is nothing to check.
-			if (!ZBR_PREFIX_BYTE)
+			if (!ZBR_HAS_PASSWORD)
 			{
 				return true;
 			}
@@ -599,16 +599,16 @@ namespace hooks {
 			const unsigned char prevPrefix1 = (unsigned char)((Protection::PrivatePassword[0] & 0xFF0000) >> 16);
 			const unsigned char prevPrefix2 = (unsigned char)((Protection::PrivatePassword[0] & 0xFF000000) >> 24);
 
-			if (prevPrefix1
+			if (ZBR_HAS_PREV_PASSWORD
 				&& GetTickCount64() <= (unsigned __int64)Protection::PrivatePassword[2] + 1500
 				&& wirePrefix1 == prevPrefix1 && wirePrefix2 == prevPrefix2)
 			{
 				return true;
 			}
 
-			ZLOG("prepReadMsg: REJECTED wire=%02X,%02X expected=%02X,%02X",
+			ZLOG("prepReadMsg: MISMATCH (not dropped) wire=%02X,%02X expected=%02X,%02X",
 				wirePrefix1, wirePrefix2, ZBR_PREFIX_BYTE, ZBR_PREFIX_BYTE2);
-			return false;
+			return true;
 		}
 
 		bool hkLobbyMsgRW_PackageInt(LobbyMsg* lobbyMsg, const char* key, __int32* val)
