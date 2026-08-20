@@ -15,3 +15,10 @@ x86/
 # Visual Studio
 .vs/
 *.user
+
+# Local build/staging output
+artifact/
+packages/
+
+# Local dev scripts and their output
+dev/
