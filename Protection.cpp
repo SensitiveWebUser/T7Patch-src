@@ -178,10 +178,121 @@ SD(secid)
 SD(seckey)
 SD(addrbuff)
 
+// The conf is read as raw bytes, so a password typed there arrives in whatever encoding the editor wrote
+static bool is_valid_utf8(const char* text, size_t length)
+{
+	size_t i = 0;
+	while (i < length)
+	{
+		const unsigned char lead = (unsigned char)text[i];
+		size_t trailing = 0;
+		unsigned int codepoint = 0;
+
+		if (lead < 0x80)
+		{
+			i++;
+			continue;
+		}
+		else if ((lead & 0xE0) == 0xC0) { trailing = 1; codepoint = lead & 0x1F; }
+		else if ((lead & 0xF0) == 0xE0) { trailing = 2; codepoint = lead & 0x0F; }
+		else if ((lead & 0xF8) == 0xF0) { trailing = 3; codepoint = lead & 0x07; }
+		else { return false; }
+
+		if (i + trailing >= length)
+		{
+			return false;
+		}
+
+		for (size_t k = 1; k <= trailing; k++)
+		{
+			const unsigned char cont = (unsigned char)text[i + k];
+			if ((cont & 0xC0) != 0x80)
+			{
+				return false;
+			}
+			codepoint = (codepoint << 6) | (cont & 0x3F);
+		}
+
+		// Overlong forms, surrogates and out-of-range values are rejected: an ANSI password can
+		// match the shape of a UTF-8 sequence by accident, and these are the cases where it does.
+		if (trailing == 1 && codepoint < 0x80) { return false; }
+		if (trailing == 2 && codepoint < 0x800) { return false; }
+		if (trailing == 3 && codepoint < 0x10000) { return false; }
+		if (codepoint > 0x10FFFF) { return false; }
+		if (codepoint >= 0xD800 && codepoint <= 0xDFFF) { return false; }
+
+		i += trailing + 1;
+	}
+
+	return true;
+}
+
+// Bytes that are already valid UTF-8 are left alone. Anything else is read as the system ANSI code
+// page. Every failure path returns the input unchanged, so a password can never be made worse
+static std::string canonicalise_password(const char* pass)
+{
+	if (!pass || !(*pass))
+	{
+		return std::string();
+	}
+
+	const size_t length = strlen(pass);
+	if (is_valid_utf8(pass, length))
+	{
+		return std::string(pass, length);
+	}
+
+	const int wideLength = MultiByteToWideChar(CP_ACP, 0, pass, (int)length, NULL, 0);
+	if (wideLength <= 0)
+	{
+		return std::string(pass, length);
+	}
+
+	std::wstring wide((size_t)wideLength, L'\0');
+	if (MultiByteToWideChar(CP_ACP, 0, pass, (int)length, &wide[0], wideLength) != wideLength)
+	{
+		return std::string(pass, length);
+	}
+
+	const int utf8Length = WideCharToMultiByte(CP_UTF8, 0, &wide[0], wideLength, NULL, 0, NULL, NULL);
+	if (utf8Length <= 0)
+	{
+		return std::string(pass, length);
+	}
+
+	std::string utf8((size_t)utf8Length, '\0');
+	if (WideCharToMultiByte(CP_UTF8, 0, &wide[0], wideLength, &utf8[0], utf8Length, NULL, NULL) != utf8Length)
+	{
+		return std::string(pass, length);
+	}
+
+	return utf8;
+}
+
+static thread_local bool applying_from_config = false;
+
+static void config_store_playername(const char* name);
+static void config_store_friendsonly(bool isFriendsOnly);
+static void config_store_password(const char* utf8Password);
+
+// One-shot: the banner is printed during install(), which is before the injector pushes anything,
+// so the route can only be reported once it actually happens.
+static void note_external_push(const char* setter)
+{
+	static bool reported = false;
+	if (!applying_from_config && !reported)
+	{
+		reported = true;
+		ZLOG("cfg: external push via %s - an injector is driving settings, not t7patch.conf", setter);
+	}
+}
+
 EXPORT void SetFriendsOnly(bool isFriendsOnly)
 {
     Protection::IsFriendsOnly = isFriendsOnly;
     ZLOG("cfg: friendsOnly=%d", (int)isFriendsOnly);
+    note_external_push("SetFriendsOnly");
+    config_store_friendsonly(isFriendsOnly);
 }
 
 EXPORT void SetPlayerName(const char* name)
@@ -196,20 +307,30 @@ EXPORT void SetPlayerName(const char* name)
 
     strncpy_s((char*)(pUserData + 0x8), 16, Protection::CustomName, sizeof(Protection::CustomName));
     strncpy_s((char*)(pNameBuffer), 16, Protection::CustomName, sizeof(Protection::CustomName));
+
+    note_external_push("SetPlayerName");
+    config_store_playername(Protection::CustomName);
 }
 
 EXPORT void SetNetworkPassword(const char* pass)
 {
-    if (!pass || !(*pass))
+    // Hashed from the canonical UTF-8 form, never from the caller's bytes, so the conf and the
+    // injector GUI agree on what the password is.
+    const std::string canonical = canonicalise_password(pass);
+
+    if (canonical.empty())
     {
         Protection::SetNetworkPassword(0);
     }
     else
     {
-        Protection::SetNetworkPassword(GSCUHashing::canon_hash64(pass));
+        Protection::SetNetworkPassword(GSCUHashing::canon_hash64(canonical.c_str()));
     }
-    ZLOG("cfg: password %s, prefix=%02X,%02X", (pass && *pass) ? "SET" : "cleared",
+    ZLOG("cfg: password %s, prefix=%02X,%02X", canonical.empty() ? "cleared" : "SET",
         ZBR_PREFIX_BYTE, ZBR_PREFIX_BYTE2);
+
+    note_external_push("SetNetworkPassword");
+    config_store_password(canonical.c_str());
 }
 
 IHOOK_HEADER(IsProcessorFeaturePresent, BOOL, (DWORD processorFeature))
@@ -684,6 +805,22 @@ struct patch_config
         memset(playername, 0, 16);
     }
 
+    void set_password(const char* value)
+    {
+        if (networkpassword)
+        {
+            free(networkpassword);
+            networkpassword = NULL;
+        }
+
+        const size_t bufsize = (value ? strlen(value) : 0) + 1;
+        networkpassword = (char*)malloc(bufsize);
+        if (networkpassword)
+        {
+            strcpy_s(networkpassword, bufsize, value ? value : "");
+        }
+    }
+
     bool update_watcher_time(const char* path)
     {
         bool did_exist_before = exists;
@@ -849,13 +986,50 @@ struct patch_config
 
 patch_config user_config;
 
+static void config_store_playername(const char* name)
+{
+    if (applying_from_config || !name)
+    {
+        return;
+    }
+
+    user_config.__playername();
+    strcpy_s(user_config.playername, sizeof(user_config.playername), name);
+    user_config.saveto(PATCH_CONFIG_LOCATION);
+}
+
+static void config_store_friendsonly(bool isFriendsOnly)
+{
+    if (applying_from_config)
+    {
+        return;
+    }
+
+    user_config.isfriendsonly = isFriendsOnly ? 1 : 0;
+    user_config.saveto(PATCH_CONFIG_LOCATION);
+}
+
+static void config_store_password(const char* utf8Password)
+{
+    if (applying_from_config)
+    {
+        return;
+    }
+
+    user_config.set_password(utf8Password);
+    user_config.saveto(PATCH_CONFIG_LOCATION);
+}
+
 void apply_settings()
 {
     g_trace_enabled.store(user_config.debuglog != 0, std::memory_order_relaxed);
     ZLOG("cfg: applying t7patch.conf");
+
+    applying_from_config = true;
     SetPlayerName(user_config.playername);
     SetFriendsOnly(user_config.isfriendsonly);
     SetNetworkPassword(user_config.networkpassword);
+    applying_from_config = false;
 }
 
 DWORD WINAPI MainThread(LPVOID lpParam)
@@ -1260,9 +1434,8 @@ void Protection::install()
     ZLOG("install done: hooked=%d oldPrints=%p retnAddy=%p ZwContinue=%p",
         (int)Protection::ExceptionHookInstalled, (void*)Protection::Old_lobbymsgprints,
         (void*)Protection::CachedRetnAddy, (void*)(uintptr_t)Protection::ZwContinue);
-    ZLOG("session: %s | route=%s | name=\"%s\" | friendsOnly=%d | prefix=%02X,%02X",
-        ZBR_VERSION_FULL, Protection::IsInjectorlessInstall ? "injectorless" : "injector",
-        Protection::CustomName, (int)Protection::IsFriendsOnly,
+    ZLOG("session: %s | name=\"%s\" | friendsOnly=%d | prefix=%02X,%02X",
+        ZBR_VERSION_FULL, Protection::CustomName, (int)Protection::IsFriendsOnly,
         ZBR_PREFIX_BYTE, ZBR_PREFIX_BYTE2);
     Protection::Installed = true;
 }
@@ -1848,10 +2021,10 @@ bool Protection::CheckPendingInfoRequests(__int64 XUID, msg_t* _msg)
     memcpy(&cpyMsg, _msg, sizeof(msg_t));
 
     unsigned int size = cpyMsg.cursize - cpyMsg.readcount;
-    ZLOG("checkPending: xuid=%p cursize=%u readcount=%u size=%u",
-        (void*)XUID, cpyMsg.cursize, cpyMsg.readcount, size);
     if (size < 2048u)
     {
+        ZLOG("checkPending: xuid=%p cursize=%u readcount=%u size=%u",
+            (void*)XUID, cpyMsg.cursize, cpyMsg.readcount, size);
         char data[2048]{};
         MSG_ReadData(&cpyMsg, data, size);
 
