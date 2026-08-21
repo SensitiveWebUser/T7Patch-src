@@ -562,7 +562,7 @@ void RunPatching()
 	hooks::ApplyMemoryPatches();
 
 	// Apply Exception Handler
-    Protection::ExceptionHookInstalled = InstallHook(ExceptHook);
+    Protection::ExceptionHookInstalled = InstallHook((void*)ExceptHook);
 
 	// Install the protection hooks. install() checks the flag above because it arms a fault-driven
 	// hook that would hard-crash on the first lobby message with no handler installed.

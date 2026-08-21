@@ -173,7 +173,7 @@ public:
 // steamapi, who, inviteArg
 #define STEAMAPI_STEAMUSER_SENDINVITE STEAMVTO(0x188)
 #define STEAMAPI_STEAMUSER_VT_NAMEBYXUID STEAMVTO(0x38)
-#define IHOOK_HEADER(fn_name, fn_return, fn_args) using fn_name ## _fn = fn_return ## (__stdcall*)fn_args; \
+#define IHOOK_HEADER(fn_name, fn_return, fn_args) using fn_name ## _fn = fn_return (__stdcall*)fn_args; \
 fn_name ## _fn o ## fn_name; \
 fn_return WINAPI __ ## fn_name fn_args
 #define IHOOK_INSTALL(fn_name, module__) o ## fn_name = (fn_name ## _fn)Iat_hook_::detour_iat_ptr(#fn_name, (void*)__ ## fn_name, module__);

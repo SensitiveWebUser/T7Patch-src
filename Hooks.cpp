@@ -156,7 +156,7 @@ namespace hooks {
 				return 0;
 			}
 
-			Memset(buf, 0i64, bufSize);
+			Memset(buf, 0LL, bufSize);
 			Live_Base_UserGetName((UINT8*)buf, bufSize, 1);
 
 			return 1;
@@ -168,7 +168,7 @@ namespace hooks {
 				return -1.0f;
 			}
 
-			auto slot = (DWORD64*)(a1 + 24i64 * a2 + 56);
+			auto slot = (DWORD64*)(a1 + 24LL * a2 + 56);
 			if (Protection::IsBadReadPtr(slot) || Protection::IsBadReadPtr((char*)slot + 7)) {
 				return -1.0f; // matches this hook's own fallthrough below
 			}
@@ -1053,7 +1053,7 @@ namespace hooks {
 	}
 
 	// A macro only so the log carries the detour's name: #detour needs the preprocessor.
-#define CREATE_HOOK(target, detour, original) CreateHookChecked((target), (detour), (original), #detour)
+#define CREATE_HOOK(target, detour, original) CreateHookChecked((target), (LPVOID)(detour), (original), #detour)
 
 	void ApplyHooks()
 	{
