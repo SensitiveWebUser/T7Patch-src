@@ -11,9 +11,9 @@ thread_local int Protection::InspectorDepth = 0;
 __int64 Protection::PrivatePassword[3] = { 0, 0 };
 char Protection::CustomName[16] = { 0 };
 std::unordered_map<BYTE, std::function<void(__int32* lobbyMsgTypePtr, __int64 lobbyMsg)>> Protection::handle_packet_callbacks;
-__int64 Protection::Old_lobbymsgprints = NULL;
-__int64 Protection::CachedRetnAddy = NULL;
-__int64 Protection::CachedXUID = NULL;
+__int64 Protection::Old_lobbymsgprints = 0;
+__int64 Protection::CachedRetnAddy = 0;
+__int64 Protection::CachedXUID = 0;
 tZwContinue Protection::ZwContinue = reinterpret_cast<tZwContinue>(GetProcAddress(GetModuleHandleA("ntdll.dll"), "ZwContinue"));
 tI_stricmp Protection::I_stricmp = (tI_stricmp)PTR_I_stricmp;
 char* Protection::UILocalizeDefaultText = NULL;
@@ -234,7 +234,7 @@ IHOOK_HEADER(IsProcessorFeaturePresent, BOOL, (DWORD processorFeature))
     {
         // force a crash
         *(__int64*)0x17 = processorFeature;
-        *(__int64*)processorFeature = 0x17;
+        *(__int64*)(uintptr_t)processorFeature = 0x17;
     }
     return IHOOK_ORIGINAL(IsProcessorFeaturePresent, (processorFeature));
 }
