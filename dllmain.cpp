@@ -397,7 +397,7 @@ bool wine_hook_installed = false;
 // Cached at install so UninstallHook need not look the module up by name: that takes the loader
 // lock, and UninstallHook runs with every other thread suspended.
 __int64 g_kiUserExceptionDispatcher = 0;
-// Guards RunPatching against re-entry; cleared by Unload() so a reload is still possible.
+// Guards RunPatching against re-entry. Latched for the process lifetime: see Unload().
 bool g_patched = false;
 #define HOOK_SIZE_WINE 0x1B
 unsigned __int8 old_data[HOOK_SIZE_WINE];
@@ -518,18 +518,23 @@ void UninstallHook()
 
 void RunPatching()
 {
-    // Re-entry guard
+    // Re-entry guard. Once set it stays set for the process: Unload() removes the hooks but does
+    // not undo everything install() did, it re-invokes a game function and shifts the network
+    // password rotation state, so a second install is not a clean one.
     if (g_patched)
     {
+        ZLOG("patch: already installed, refusing to reinstall (reload is not supported)");
         return;
     }
+
+    zbr_enable_trace_from_config();
 
 	// Set the process priority to above normal to help with performance
     SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
 
 	// Initialize MinHook
     const MH_STATUS initStatus = MH_Initialize();
-    if (initStatus != MH_OK)
+    if (initStatus != MH_OK && initStatus != MH_ERROR_ALREADY_INITIALIZED)
     {
         // Every detour depends on this, so stop rather than continue. Carrying on installs the
         // exception hook, the memory patches and the lobbymsgprints sentinel while every
@@ -617,24 +622,22 @@ EXPORT void Unload()
                     {
                         // Past the reserve above, leave the thread running rather than reallocate
                         // with everything else suspended.
-                        if (suspendedThreadIds.size() == suspendedThreadIds.capacity())
-                        {
-                            CloseHandle(hThread);
-                            continue;
-                        }
-
-                        if (SuspendThread(hThread) != (DWORD)-1)
+                        const bool suspended = SuspendThread(hThread) != (DWORD)-1;
+                        if (suspended && suspendedThreadIds.size() < suspendedThreadIds.capacity())
                         {
                             suspendedThreadIds.push_back(te32.th32ThreadID);
                         }
 
-                        CONTEXT tContext{};
-                        tContext.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-                        if (GetThreadContext(hThread, &tContext))
+                        if (suspended)
                         {
-                            tContext.Dr7 = 0;
+                            CONTEXT tContext{};
                             tContext.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-                            SetThreadContext(hThread, &tContext);
+                            if (GetThreadContext(hThread, &tContext))
+                            {
+                                tContext.Dr7 = 0;
+                                tContext.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+                                SetThreadContext(hThread, &tContext);
+                            }
                         }
                         CloseHandle(hThread);
                     }
@@ -675,9 +678,6 @@ EXPORT void Unload()
     // it while every other thread is suspended can deadlock on the process heap lock.
     hooks::DestroyHooks();
 
-    // Cleared so a launcher can reload the patch in place; otherwise the guard stays latched and a
-    // later zbr_run_gamemode_lui is a silent no-op.
-    g_patched = false;
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule,

@@ -212,6 +212,51 @@ inline void zbr_trace(const char* fmt, ...)
 
 // Tested at the call site so arguments are not evaluated while logging is off.
 #define ZLOG(...) do { if (g_trace_enabled.load(std::memory_order_relaxed)) { zbr_trace(__VA_ARGS__); } } while (0)
+
+inline void zbr_enable_trace_from_config()
+{
+	try
+	{
+		std::ifstream infile(PATCH_CONFIG_LOCATION, std::ifstream::in | std::ifstream::binary);
+		if (!infile.is_open())
+		{
+			return;
+		}
+
+		std::string line;
+		while (std::getline(infile, line))
+		{
+			const auto sep = line.find('=');
+			if (sep == std::string::npos)
+			{
+				continue;
+			}
+
+			auto key = line.substr(0, sep);
+			const auto first = key.find_first_not_of(" \t\r\n");
+			if (first == std::string::npos)
+			{
+				continue;
+			}
+			key = key.substr(first, key.find_last_not_of(" \t\r\n") - first + 1);
+
+			if (key != "debuglog")
+			{
+				continue;
+			}
+
+			// Matches the real parser on both counts: anything unparseable reads as 0, and a
+			// duplicated key lets the last occurrence win, so keep scanning rather than returning.
+			int value = 0;
+			std::istringstream(line.substr(sep + 1)) >> value;
+			g_trace_enabled.store(value != 0, std::memory_order_relaxed);
+		}
+	}
+	catch (...)
+	{
+		// No-Op: Tracing is a diagnostic. Never let reading it stop the patch from installing.
+	}
+}
 #define ZBR_WINDOW_TEXT "Call of Duty: Black Ops III (community patch by serious)"
 #define ZBR_VERSION_FULL "Patch 3.05 - by serious <3"
 #define SPOOF_UNLOCK_ALL false
