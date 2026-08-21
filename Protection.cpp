@@ -223,7 +223,7 @@ EXPORT void SetNetworkPassword(const char* pass)
     // hiding it.
     if (trimmed.length() > ZBR_INJECTOR_PASSWORD_MAXLEN)
     {
-        ZLOG("cfg: password is %zu chars the injector's box stops at %u, so a player entering it "
+        ZLOG("cfg: password is %zu chars - the injector's box stops at %u, so a player entering it "
             "there will not match this one", trimmed.length(), ZBR_INJECTOR_PASSWORD_MAXLEN);
     }
 }
@@ -1711,7 +1711,7 @@ int Protection::MSG_LobbyStateGame_Package_Inspect(char* __this, char* lobbyMsg)
 
         packageOK = packageOK && LobbyMsgRW_PackageInt(lobbyMsg, STR(settingssize), (__int32*)(_this + 7350));
 
-        if (packageOK && ((_this[7350] <= 0) || (_this[7350] > 0xC000)))
+        if ((_this[7350] <= 0) || (_this[7350] > 0xC000))
         {
             // BoF attempt
             return 20 + 5;
@@ -1852,15 +1852,34 @@ int Protection::MSG_HostHeartbeat_Inspect(char* __this, char* lobbyMsg)
     return 0;
 }
 
-bool Protection::CheckPendingInfoRequests(__int64 XUID, msg_t* _msg)
+bool Protection::CheckPendingInfoRequests(__int64 XUID, const char* message, unsigned int messageSize)
 {
-    if (!_msg)
+    if (!message)
+    {
+        return false;
+    }
+
+    if (messageSize < sizeof(msg_t))
     {
         return false;
     }
 
     msg_t cpyMsg;
-    memcpy(&cpyMsg, _msg, sizeof(msg_t));
+    memcpy(&cpyMsg, message, sizeof(msg_t));
+
+    const bool headerDescribesThisPacket =
+        cpyMsg.readcount <= cpyMsg.cursize
+        && cpyMsg.cursize <= messageSize
+        && cpyMsg.data >= message
+        && cpyMsg.data <= message + messageSize
+        && (unsigned int)(message + messageSize - cpyMsg.data) >= cpyMsg.cursize;
+
+    if (!headerDescribesThisPacket)
+    {
+        ZLOG("checkPending: REJECTED bogus header xuid=%p data=%p cursize=%u readcount=%u len=%u",
+            (void*)XUID, (void*)cpyMsg.data, cpyMsg.cursize, cpyMsg.readcount, messageSize);
+        return false;
+    }
 
     unsigned int size = cpyMsg.cursize - cpyMsg.readcount;
     if (size < 2048u)
@@ -1883,23 +1902,15 @@ bool Protection::CheckPendingInfoRequests(__int64 XUID, msg_t* _msg)
             if (lobby_msg.msgType == MESSAGE_TYPE_INFO_RESPONSE)
             {
                 Msg_InfoResponse response{};
-                __int32 result;
-                {
-                    // Scoped tightly so only our own parser runs with validation suppressed;
-                    // everything after this block must see real Package* results.
-                    Protection::InspectorScope _inspecting;
-                    result = MSG_InfoResponseSafe(&response, &lobby_msg);
-                }
+                __int32 result = MSG_InfoResponseSafe(&response, &lobby_msg);
                 if (result)
                 {
-                    // Advisory, not a drop: this parser has never been validated against a genuine
-                    // info response, and a false positive would blank the server browser and break
-                    // invite-joins. Only drop here once it is checked against captured traffic.
-                    //XLOG("SUSPECT INFO RESPONSE: REASON %d", result);
+                    ZLOG("checkPending: infoResponse SUSPECT (reason=%d), dropped", result);
+                    return true;
                 }
 
-                ZLOG("checkPending: infoResponse inspect=%d, handing to game", result);
-                dwInstantHandleLobbyMessage(XUID, 0, (char*)_msg);
+                ZLOG("checkPending: infoResponse ok, handing to game");
+                dwInstantHandleLobbyMessage(XUID, 0, (char*)message);
                 return true;
             }
             else

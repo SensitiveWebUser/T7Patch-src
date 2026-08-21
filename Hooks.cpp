@@ -36,16 +36,7 @@ namespace hooks {
 			return true;
 		}
 
-		// Incentive ids with no content behind them (24 cwl_mtx, 29 unavailable, 34 duplicate
-		// stpatrick_04). Reporting them as owned is what renders the blank CWL calling cards.
-		static bool is_broken_incentive(int incentiveId)
-		{
-			return incentiveId == 24 || incentiveId == 29 || incentiveId == 34;
-		}
-
 		bool hkLiveEntitlements_IsEntitlementActiveForController(ControllerIndex_t controllerIndex, int incentiveId) {
-
-			if (is_broken_incentive(incentiveId)) return false;
 
 			return true;
 		}
@@ -334,6 +325,8 @@ namespace hooks {
 		{
 			if (size < 0)
 			{
+				*dest = 0;
+				*source = 0;
 				return 0;
 			}
 			return qmemcpy(dest, source, size);
@@ -508,7 +501,7 @@ namespace hooks {
 
 			ZLOG("dispatch: type=0x%02X valid=%d xuid=%p size=%u",
 				packetType, (int)is_valid_packet, (void*)senderXuid, messageSize);
-			if (is_valid_packet && (packetType == 0x68) && Protection::CheckPendingInfoRequests(senderXuid, (msg_t*)message))
+			if (is_valid_packet && (packetType == 0x68) && Protection::CheckPendingInfoRequests(senderXuid, message, messageSize))
 			{
 				return 0;
 			}
@@ -583,8 +576,6 @@ namespace hooks {
 				return true;
 			}
 
-			// Read both bytes unconditionally: short-circuiting on the first would consume only one
-			// and leave the read cursor misaligned.
 			const unsigned char wirePrefix1 = ((unsigned char(__fastcall*)(__int64))PTR_MSG_ReadByte)(lm);
 			const unsigned char wirePrefix2 = ((unsigned char(__fastcall*)(__int64))PTR_MSG_ReadByte)(lm);
 
@@ -595,7 +586,7 @@ namespace hooks {
 
 			// Grace window, as in hkSys_VerifyPacketChecksum: peers rotate the password at
 			// unsynchronised moments, so briefly accept the previous one. PrivatePassword[0] holds
-			// it, [2] is the rotation time
+			// it, [2] is the rotation time.
 			const unsigned char prevPrefix1 = (unsigned char)((Protection::PrivatePassword[0] & 0xFF0000) >> 16);
 			const unsigned char prevPrefix2 = (unsigned char)((Protection::PrivatePassword[0] & 0xFF000000) >> 24);
 
@@ -606,7 +597,10 @@ namespace hooks {
 				return true;
 			}
 
-			ZLOG("prepReadMsg: MISMATCH (not dropped) wire=%02X,%02X expected=%02X,%02X",
+			msg_t* msg = (msg_t*)lm;
+			msg->readcount = msg->cursize;
+
+			ZLOG("prepReadMsg: DROPPED wire=%02X,%02X expected=%02X,%02X",
 				wirePrefix1, wirePrefix2, ZBR_PREFIX_BYTE, ZBR_PREFIX_BYTE2);
 			return true;
 		}

@@ -92,7 +92,7 @@ public:
 	static int MSG_LobbyState_Package_Inspect(char* __this, char* lobbyMsg);
 	static int MSG_LobbyStateGame_Package_Inspect(char* __this, char* lobbyMsg);
 	static int MSG_HostHeartbeat_Inspect(char* __this, char* lobbyMsg);
-	static bool CheckPendingInfoRequests(__int64 XUID, msg_t* _msg);
+	static bool CheckPendingInfoRequests(__int64 XUID, const char* message, unsigned int messageSize);
 	static bool ReadP2PPacket(uintptr_t thisptr, void* pub_dest, unsigned int cub_dest, unsigned int* cub_msg_size, unsigned __int64* steam_id_remote, int n_channel);
 	static bool GetOwnsContent(INT64 a, INT32 b);
 	static bool GetOwnsContent2(INT64 a, INT32 b);
