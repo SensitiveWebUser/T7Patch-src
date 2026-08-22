@@ -224,8 +224,21 @@ inline void zbr_enable_trace_from_config()
 		}
 
 		std::string line;
+		bool firstLine = true;
 		while (std::getline(infile, line))
 		{
+			// Strip a UTF-8 BOM, exactly as trim_config_field does for the full read. Without this
+			// a conf saved by Notepad with debuglog on its first line reads as "\xEF\xBB\xBFdebuglog".
+			if (firstLine)
+			{
+				firstLine = false;
+				if (line.size() >= 3 && (unsigned char)line[0] == 0xEF
+					&& (unsigned char)line[1] == 0xBB && (unsigned char)line[2] == 0xBF)
+				{
+					line.erase(0, 3);
+				}
+			}
+
 			const auto sep = line.find('=');
 			if (sep == std::string::npos)
 			{
