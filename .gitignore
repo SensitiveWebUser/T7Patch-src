@@ -22,3 +22,6 @@ packages/
 
 # Local dev scripts and their output
 dev/
+
+# VS resource-editor binary, created once T7Patch.rc is opened in the designer
+*.aps
