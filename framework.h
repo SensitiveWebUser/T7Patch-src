@@ -3,6 +3,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <ctype.h>
 #include <iostream>
+#include <string>
+#include <vector>
+#include <algorithm>
 #include <Winternl.h>
 #include <unordered_set>
 #include <filesystem>
@@ -15,6 +18,10 @@
 #include <intrin.h>
 #include <cstdint>
 #include <cstddef>
+#include <cstdarg>
+#include <cstring>
+#include <cstdio>
+#include <atomic>
 #include <TlHelp32.h>
 #include "structs.h"
 #include "minhook/include/MinHook.h"
@@ -23,7 +30,6 @@
 #include "Protection.h"
 #include "Hooks.h"
 
-constexpr uint32_t fnv_base_32 = 0x4B9ACE2F;
 
 inline uint32_t fnv1a(const char* key) {
 
@@ -62,21 +68,21 @@ constexpr unsigned __int32 fnv1a_const(const char* input)
 
 #define FNV32(x) canon_const_builtins<fnv1a_const(x)>::value
 
-inline bool is_in_array(std::string cmp1, std::vector<std::string> cmp2)
+inline bool is_in_array(const std::string& value, const std::vector<std::string>& allowed)
 {
-	for (auto& cmp : cmp2)
+	for (const auto& candidate : allowed)
 	{
-		if (!strcmp(cmp1.data(), cmp.data()))
+		if (value == candidate)
 			return true;
 	}
 	return false;
 }
 
-inline bool is_in_number_array(int cmp1, std::vector<int> cmp2)
+inline bool is_in_number_array(int value, const std::vector<int>& allowed)
 {
-	for (auto cmp : cmp2)
+	for (auto candidate : allowed)
 	{
-		if (cmp1 == cmp)
+		if (value == candidate)
 			return true;
 	}
 	return false;
@@ -88,18 +94,18 @@ inline std::string to_lower(std::string text)
 	return text;
 }
 
-inline bool is_equal(const std::string& lhs, const std::string& rhs, const std::size_t count, const bool case_sensitive)
+inline bool is_equal(const std::string& lhs, const std::string& rhs, const std::size_t max_chars, const bool case_sensitive)
 {
 	auto left = lhs;
 	auto right = rhs;
 
-	if (count != std::string::npos)
+	if (max_chars != std::string::npos)
 	{
-		if (lhs.size() > count)
-			left.erase(count);
+		if (lhs.size() > max_chars)
+			left.erase(max_chars);
 
-		if (rhs.size() > count)
-			right.erase(count);
+		if (rhs.size() > max_chars)
+			right.erase(max_chars);
 	}
 
 	if (case_sensitive)
@@ -111,11 +117,6 @@ inline bool is_equal(const std::string& lhs, const std::string& rhs, const std::
 	{
 		return to_lower(left) == to_lower(right);
 	}
-}
-
-inline bool is_address_within_range(std::uintptr_t address, std::uintptr_t min, std::uintptr_t max)
-{
-	return (address >= min && address <= max);
 }
 
 inline std::vector<std::string> legit_packets = {
@@ -138,6 +139,131 @@ inline std::vector<std::string> legit_packets = {
 
 #define CRASH_LOG_NAME "crashes.log"
 #define PATCH_CONFIG_LOCATION "t7patch.conf"
+
+// Diagnostic trace log, written to t7patch_trace.log next to the game.
+// Off unless t7patch.conf contains `debuglog=1`.
+#define ZBR_TRACE_NAME "t7patch_trace.log"
+
+inline std::atomic<bool> g_trace_enabled{ false };
+
+// Rotated to .1 rather than truncated once past this, so a long session cannot fill the disk
+// and the run before the current one survives.
+#define ZBR_TRACE_MAX_BYTES (16 * 1024 * 1024)
+
+// Opens and closes the file per line instead of holding a handle. That is slow
+// and deliberate: a fault here ends in SuspendProcess, and the value of this log
+// is the line written immediately before it. crashes.log cannot supply that - it
+// prints a CONTEXT that is not one.
+inline void zbr_trace(const char* fmt, ...)
+{
+	static SRWLOCK lock = SRWLOCK_INIT;
+
+	// SRWLOCK is not recursive, and this is reachable from the exception handler. A fault
+	// raised inside fopen/fprintf below would re-enter on the same thread and block forever,
+	// which is a hang rather than a crash
+	static thread_local bool in_trace = false;
+	if (in_trace)
+	{
+		return;
+	}
+	in_trace = true;
+
+	char line[512];
+	va_list args;
+	va_start(args, fmt);
+	const int written = vsnprintf(line, sizeof(line), fmt, args);
+	va_end(args);
+
+	if (written >= 0)
+	{
+		SYSTEMTIME t{};
+		GetLocalTime(&t);
+
+		AcquireSRWLockExclusive(&lock);
+		FILE* traceFile = fopen(ZBR_TRACE_NAME, "a");
+		if (traceFile)
+		{
+			fseek(traceFile, 0, SEEK_END);
+			if (ftell(traceFile) >= ZBR_TRACE_MAX_BYTES)
+			{
+				fclose(traceFile);
+				remove(ZBR_TRACE_NAME ".1");
+				rename(ZBR_TRACE_NAME, ZBR_TRACE_NAME ".1");
+				traceFile = fopen(ZBR_TRACE_NAME, "a");
+			}
+		}
+		if (traceFile)
+		{
+			fprintf(traceFile, "%02u:%02u:%02u.%03u t%-5lu %s\n",
+				t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, GetCurrentThreadId(), line);
+			fclose(traceFile);
+		}
+		ReleaseSRWLockExclusive(&lock);
+	}
+
+	in_trace = false;
+}
+
+// Tested at the call site so arguments are not evaluated while logging is off.
+#define ZLOG(...) do { if (g_trace_enabled.load(std::memory_order_relaxed)) { zbr_trace(__VA_ARGS__); } } while (0)
+
+inline void zbr_enable_trace_from_config()
+{
+	try
+	{
+		std::ifstream infile(PATCH_CONFIG_LOCATION, std::ifstream::in | std::ifstream::binary);
+		if (!infile.is_open())
+		{
+			return;
+		}
+
+		std::string line;
+		bool firstLine = true;
+		while (std::getline(infile, line))
+		{
+			// Strip a UTF-8 BOM, exactly as trim_config_field does for the full read. Without this
+			// a conf saved by Notepad with debuglog on its first line reads as "\xEF\xBB\xBFdebuglog".
+			if (firstLine)
+			{
+				firstLine = false;
+				if (line.size() >= 3 && (unsigned char)line[0] == 0xEF
+					&& (unsigned char)line[1] == 0xBB && (unsigned char)line[2] == 0xBF)
+				{
+					line.erase(0, 3);
+				}
+			}
+
+			const auto sep = line.find('=');
+			if (sep == std::string::npos)
+			{
+				continue;
+			}
+
+			auto key = line.substr(0, sep);
+			const auto first = key.find_first_not_of(" \t\r\n");
+			if (first == std::string::npos)
+			{
+				continue;
+			}
+			key = key.substr(first, key.find_last_not_of(" \t\r\n") - first + 1);
+
+			if (key != "debuglog")
+			{
+				continue;
+			}
+
+			// Matches the real parser on both counts: anything unparseable reads as 0, and a
+			// duplicated key lets the last occurrence win, so keep scanning rather than returning.
+			int value = 0;
+			std::istringstream(line.substr(sep + 1)) >> value;
+			g_trace_enabled.store(value != 0, std::memory_order_relaxed);
+		}
+	}
+	catch (...)
+	{
+		// No-Op: Tracing is a diagnostic. Never let reading it stop the patch from installing.
+	}
+}
 #define ZBR_WINDOW_TEXT "Call of Duty: Black Ops III (community patch by serious)"
-#define ZBR_VERSION_FULL "Patch 3.04 - by serious <3"
+#define ZBR_VERSION_FULL "Patch 3.05 - by serious <3"
 #define SPOOF_UNLOCK_ALL false
