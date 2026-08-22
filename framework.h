@@ -30,7 +30,6 @@
 #include "Protection.h"
 #include "Hooks.h"
 
-constexpr uint32_t fnv_base_32 = 0x4B9ACE2F;
 
 inline uint32_t fnv1a(const char* key) {
 
@@ -118,11 +117,6 @@ inline bool is_equal(const std::string& lhs, const std::string& rhs, const std::
 	{
 		return to_lower(left) == to_lower(right);
 	}
-}
-
-inline bool is_address_within_range(std::uintptr_t address, std::uintptr_t min, std::uintptr_t max)
-{
-	return (address >= min && address <= max);
 }
 
 inline std::vector<std::string> legit_packets = {

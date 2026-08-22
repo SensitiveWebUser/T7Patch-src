@@ -8,43 +8,39 @@ void SuspendProcess()
     NtSuspendProcess pfnNtSuspendProcess = (NtSuspendProcess)GetProcAddress(
         GetModuleHandleA("ntdll"), "NtSuspendProcess");
 
-    pfnNtSuspendProcess(processHandle);
-    CloseHandle(processHandle);
+    if (pfnNtSuspendProcess && processHandle)
+    {
+        pfnNtSuspendProcess(processHandle);
+    }
+
+    if (processHandle)
+    {
+        CloseHandle(processHandle);
+    }
+
+    // Reached only if the suspend did not take.
+    ZLOG("crash: SuspendProcess did not take (err=%lu) - letting the fault reach the default handler", GetLastError());
 }
 
 typedef unsigned long long(__fastcall* ZwContinue_t)(PCONTEXT ThreadContext, BOOLEAN RaiseAlert);
 ZwContinue_t ZwContinue = reinterpret_cast<ZwContinue_t>(GetProcAddress(GetModuleHandleA("ntdll.dll"), "ZwContinue"));
 
-char* UILocalizeDefaultText = NULL;
-
-struct debug_msg_info
-{
-    __int64 timeEmitted;
-    __int32 numEmitted;
-};
+static char g_uiLocalizeDefaultStorage[64] = "";
+char* UILocalizeDefaultText = g_uiLocalizeDefaultStorage;
 
 std::unordered_map<INT64, CONTEXT> SavedExceptions;
-std::unordered_map<DWORD, bool> EncounteredIPs;
-std::unordered_map<DWORD, debug_msg_info> PrevErrors;
-#define DMSG_COOLDOWN_TICKS 5000
 volatile LONG g_crashDumpOwnerTid = 0;
-char error_msg_buff[1024];
 const char clientfield_doesnt_exist[] = "Clientfield does not exist";
-bool is_unhooking = false;
-
-void __nullsub()
-{
-    return;
-}
+std::atomic<bool> is_unhooking{ false };
 
 void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
 {
 
-    if (is_unhooking)
+    if (is_unhooking.load())
     {
         ContextRecord->Dr7 = 0;
         ContextRecord->Rip = ROP_RETN;
-        is_unhooking = false;
+        is_unhooking.store(false);
         ZwContinue(ContextRecord, false);
     }
 
@@ -112,11 +108,6 @@ void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
 
     if (ExceptionRecord->ExceptionAddress == (PVOID)LuaCrash2)
     {
-        if (!UILocalizeDefaultText)
-        {
-            UILocalizeDefaultText = (char*)malloc(4);
-            strcpy_s(UILocalizeDefaultText, 4, "");
-        }
         ContextRecord->Rdx = (INT64)UILocalizeDefaultText; // TREYARCH WHY AM I FIXING YOUR GAME
         ZwContinue(ContextRecord, false);
         return;
@@ -124,11 +115,6 @@ void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
 
     if (ExceptionRecord->ExceptionAddress == (PVOID)LuaCrash3)
     {
-        if (!UILocalizeDefaultText)
-        {
-            UILocalizeDefaultText = (char*)malloc(4);
-            strcpy_s(UILocalizeDefaultText, 4, "");
-        }
         ContextRecord->Rsi = (INT64)UILocalizeDefaultText; // TREYARCH WHY AM I FIXING YOUR GAME
         ZwContinue(ContextRecord, false);
         return;
@@ -136,11 +122,6 @@ void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
 
     if (ExceptionRecord->ExceptionAddress == (PVOID)REBASE(0x22328F6))
     {
-        if (!UILocalizeDefaultText)
-        {
-            UILocalizeDefaultText = (char*)malloc(4);
-            strcpy_s(UILocalizeDefaultText, 4, "");
-        }
         ContextRecord->Rcx = (INT64)UILocalizeDefaultText;
         ZwContinue(ContextRecord, false);
         return;
@@ -275,13 +256,12 @@ void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
             exit(0);
         }
 
-    exitLbl:
         ZwContinue(ContextRecord, false);
         return;
     }
 
     INT64 faultingModule = 0;
-    char module_name[MAX_PATH];
+    char module_name[MAX_PATH] = "<Unknown Module>";
 
     bool b_fatal = false;
     if ((ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) || (ExceptionRecord->ExceptionFlags & EXCEPTION_NONCONTINUABLE)/* || (strstr(module_name, "blackops3.exe") && STATUS_ILLEGAL_INSTRUCTION == ExceptionRecord->ExceptionCode)*/)
@@ -324,7 +304,10 @@ void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
                 RtlPcToFileHeader((PVOID)kvp.first, (PVOID*)&faultingModule);
                 if (faultingModule)
                 {
-                    GetModuleFileNameA((HMODULE)faultingModule, module_name, MAX_PATH);
+                    if (!GetModuleFileNameA((HMODULE)faultingModule, module_name, MAX_PATH))
+                    {
+                        strcpy_s(module_name, "<Unknown Module>");
+                    }
                 }
                 else
                 {
@@ -383,12 +366,18 @@ void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
 
     if (b_fatal)
     {
-        if (g_crashDumpOwnerTid && g_crashDumpOwnerTid != (LONG)GetCurrentThreadId())
+        const LONG dumpOwner = g_crashDumpOwnerTid;
+        if (dumpOwner && dumpOwner != (LONG)GetCurrentThreadId())
         {
             HANDLE hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, GetCurrentThreadId());
-            ContextRecord->Rip = (INT64)SuspendThread;
-            ContextRecord->Rcx = (INT64)hThread;
-            ZwContinue(ContextRecord, false);
+            if (hThread)
+            {
+                ContextRecord->Rip = (INT64)SuspendThread;
+                ContextRecord->Rcx = (INT64)hThread;
+                ZwContinue(ContextRecord, false);
+            }
+
+            SuspendProcess();
         }
         else
         {
@@ -405,6 +394,17 @@ bool wine_hook_installed = false;
 __int64 g_kiUserExceptionDispatcher = 0;
 // Guards RunPatching against re-entry. Latched for the process lifetime: see Unload().
 bool g_patched = false;
+
+// Serialises RunPatching against Unload
+SRWLOCK g_lifecycleLock = SRWLOCK_INIT;
+
+struct LifecycleLock
+{
+    LifecycleLock() { AcquireSRWLockExclusive(&g_lifecycleLock); }
+    ~LifecycleLock() { ReleaseSRWLockExclusive(&g_lifecycleLock); }
+    LifecycleLock(const LifecycleLock&) = delete;
+    LifecycleLock& operator=(const LifecycleLock&) = delete;
+};
 #define HOOK_SIZE_WINE 0x1B
 unsigned __int8 old_data[HOOK_SIZE_WINE];
 unsigned __int8 new_data[HOOK_SIZE_WINE] = { 0x48, 0xB8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x48, 0x89, 0xE2, 0x48, 0x8D, 0x8C, 0x24, 0xF0, 0x04, 0x00, 0x00, 0xFF, 0xD0, 0x90, 0x90, 0x90, 0x90 };
@@ -522,7 +522,7 @@ void UninstallHook()
 {
     if (!g_exceptionDispatchSlot && !wine_hook_installed)
     {
-        is_unhooking = false;
+        is_unhooking.store(false);
         return;
     }
 
@@ -544,8 +544,6 @@ void UninstallHook()
         {
             ZLOG("uninstallHook: VirtualProtect failed for dispatch slot (err=%lu)", GetLastError());
         }
-        g_exceptionDispatchSlot = 0;
-        g_exceptionDispatchOriginal = nullptr;
     }
 
     if (wine_hook_installed && kiuserexceptiondispatcher)
@@ -554,7 +552,7 @@ void UninstallHook()
         wine_hook_installed = false;
     }
 
-    is_unhooking = false;
+    is_unhooking.store(false);
     Protection::ExceptionHookInstalled = false;
 }
 
@@ -569,7 +567,19 @@ void RunPatching()
         return;
     }
 
+    // Taken after the guard above, not before it. SRWLOCK is not recursive, so acquiring first
+    // would turn any same-thread re-entry from a free no-op into a permanent self-deadlock.
+    LifecycleLock lifecycle;
+
+    if (g_patched)
+    {
+        return;
+    }
+
     zbr_enable_trace_from_config();
+
+    // Before ApplyHooks(), which ends by enabling every detour.
+    Protection::bind_game_pointers();
 
 	// Set the process priority to above normal to help with performance
     SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
@@ -637,6 +647,8 @@ EXPORT void zbr_run_gamemode_lui(const char* input)
 
 EXPORT void Unload()
 {
+    LifecycleLock lifecycle;
+
     ZLOG("unload: begin");
     Protection::Unloading.store(true);
 
@@ -645,14 +657,31 @@ EXPORT void Unload()
     // thread is suspended, and one of them may hold the process heap lock.
     suspendedThreadIds.reserve(1024);
 
-    HANDLE hThreadSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    // Counted, not logged: everything from here to the resume loop runs with other threads suspended.
+    unsigned int getContextFailures = 0;
+    unsigned int setContextFailures = 0;
+
+    HANDLE hThreadSnap = INVALID_HANDLE_VALUE;
+    for (int attempt = 0; attempt < 3 && hThreadSnap == INVALID_HANDLE_VALUE; ++attempt)
+    {
+        hThreadSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    }
+
+    if (hThreadSnap == INVALID_HANDLE_VALUE)
+    {
+        ZLOG("unload: CreateToolhelp32Snapshot FAILED (err=%lu) - tearing down with threads running", GetLastError());
+    }
 
     if (hThreadSnap != INVALID_HANDLE_VALUE)
     {
         THREADENTRY32 te32{};
         te32.dwSize = sizeof(THREADENTRY32);
 
-        if (Thread32First(hThreadSnap, &te32))
+        if (!Thread32First(hThreadSnap, &te32))
+        {
+            ZLOG("unload: Thread32First FAILED (err=%lu) - tearing down with threads running", GetLastError());
+        }
+        else
         {
             do
             {
@@ -667,11 +696,18 @@ EXPORT void Unload()
                         {
                             CONTEXT tContext{};
                             tContext.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-                            if (GetThreadContext(hThread, &tContext))
+                            if (!GetThreadContext(hThread, &tContext))
+                            {
+                                ++getContextFailures;
+                            }
+                            else
                             {
                                 tContext.Dr7 = 0;
                                 tContext.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-                                SetThreadContext(hThread, &tContext);
+                                if (!SetThreadContext(hThread, &tContext))
+                                {
+                                    ++setContextFailures;
+                                }
                             }
 
                             if (suspendedThreadIds.size() < suspendedThreadIds.capacity())
@@ -694,7 +730,7 @@ EXPORT void Unload()
 
     Protection::uninstall();
     hooks::RemoveVMTHooks();
-    is_unhooking = true;
+    is_unhooking.store(true);
     UninstallHook();
 
     for (auto threadId : suspendedThreadIds)
@@ -706,6 +742,22 @@ EXPORT void Unload()
             ResumeThread(hThread);
             CloseHandle(hThread);
         }
+    }
+
+    // Safe to log again: every thread the loop above suspended has been resumed.
+    if (getContextFailures || setContextFailures)
+    {
+        ZLOG("unload: Dr7 left armed on %u thread(s) (GetThreadContext failed %u, SetThreadContext failed %u)",
+            getContextFailures + setContextFailures, getContextFailures, setContextFailures);
+    }
+    if (Protection::UninstallIatRestoreFailures)
+    {
+        ZLOG("unload: FAILED to restore the IsProcessorFeaturePresent IAT entry");
+    }
+    if (Protection::UninstallVtableProtectFailures)
+    {
+        ZLOG("unload: VirtualProtect failed for %u Steam vtable slot(s), still pointing into this module",
+            Protection::UninstallVtableProtectFailures);
     }
 
     // Join before the detours come out. No timeout: Unloading is set above and MainThread's loop is

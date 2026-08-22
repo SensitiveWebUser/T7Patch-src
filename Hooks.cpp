@@ -1125,7 +1125,11 @@ namespace hooks {
 
 	void DestroyHooks()
 	{
-		MH_DisableHook(MH_ALL_HOOKS);
+		const MH_STATUS disableStatus = MH_DisableHook(MH_ALL_HOOKS);
+		if (disableStatus != MH_OK)
+		{
+			ZLOG("hook: MH_DisableHook FAILED (MH_STATUS=%d) - detours may still be live", (int)disableStatus);
+		}
 		RemoveVMTHooks();
 	}
 

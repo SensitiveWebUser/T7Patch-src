@@ -1,10 +1,11 @@
 #include "Protection.h"
 
-bool has_set_window_text = false;
 bool Protection::IsFriendsOnly = false;
 bool Protection::IsInjectorlessInstall = true;
 bool Protection::Installed = false;
 std::atomic<bool> Protection::Unloading = false;
+unsigned int Protection::UninstallIatRestoreFailures = 0;
+unsigned int Protection::UninstallVtableProtectFailures = 0;
 bool Protection::ExceptionHookInstalled = false;
 void* Protection::MainThreadHandle = nullptr;
 thread_local int Protection::InspectorDepth = 0;
@@ -16,7 +17,8 @@ __int64 Protection::CachedRetnAddy = 0;
 __int64 Protection::CachedXUID = 0;
 tZwContinue Protection::ZwContinue = reinterpret_cast<tZwContinue>(GetProcAddress(GetModuleHandleA("ntdll.dll"), "ZwContinue"));
 tI_stricmp Protection::I_stricmp = (tI_stricmp)PTR_I_stricmp;
-char* Protection::UILocalizeDefaultText = NULL;
+static char g_uiLocalizeDefaultStorage[64] = "";
+char* Protection::UILocalizeDefaultText = g_uiLocalizeDefaultStorage;
 tLobbyMsgRW_PackageInt Protection::LobbyMsgRW_PackageInt = NULL;
 tLobbyMsgRW_PackageUChar Protection::LobbyMsgRW_PackageUChar = NULL;
 tLobbyMsgRW_PackageString Protection::LobbyMsgRW_PackageString = NULL;
@@ -29,52 +31,15 @@ tLobbyMsgRW_PackageArrayStart Protection::LobbyMsgRW_PackageArrayStart = NULL;
 tLobbyMsgRW_PackageElement Protection::LobbyMsgRW_PackageElement = NULL;
 tLobbyMsgRW_PackageGlob Protection::LobbyMsgRW_PackageGlob = NULL;
 tMsgMutableClientInfo_Package Protection::MsgMutableClientInfo_Package = NULL;
-tProbeLobbyInfo Protection::ProbeLobbyInfo = NULL;
 tdwInstantHandleLobbyMessage Protection::dwInstantHandleLobbyMessage = NULL;
-tNET_OutOfBandPrint Protection::NET_OutOfBandPrint = NULL;
-tdwCommonAddrToNetadr Protection::dwCommonAddrToNetadr = NULL;
-tdwRegisterSecIDAndKey Protection::dwRegisterSecIDAndKey = NULL;
-tLobbyMsgRW_PrepWriteMsg Protection::LobbyMsgRW_PrepWriteMsg = NULL;
-tLobbyMsgRW_PackageUShort Protection::LobbyMsgRW_PackageUShort = NULL;
 tLobbyMsgRW_PackageFloat Protection::LobbyMsgRW_PackageFloat = NULL;
-tMSG_Init Protection::MSG_Init = NULL;
-tMSG_WriteString Protection::MSG_WriteString = NULL;
-tMSG_WriteShort Protection::MSG_WriteShort = NULL;
-tMSG_WriteByte Protection::MSG_WriteByte = NULL;
-tMSG_WriteData Protection::MSG_WriteData = NULL;
-tCom_ControllerIndex_GetLocalClientNum Protection::Com_ControllerIndex_GetLocalClientNum = NULL;
-tCom_LocalClient_GetNetworkID Protection::Com_LocalClient_GetNetworkID = NULL;
-tNET_OutOfBandData Protection::NET_OutOfBandData = NULL;
-tLobbyMsgTransport_SendToAdr Protection::LobbyMsgTransport_SendToAdr = NULL;
 tMSG_ReadData Protection::MSG_ReadData = NULL;
 tLobbyMsgRW_PrepReadData Protection::LobbyMsgRW_PrepReadData = NULL;
-tMSG_InfoResponse Protection::MSG_InfoResponse = NULL;
-tLobbyMsgRW_PackageChar Protection::LobbyMsgRW_PackageChar = NULL;
-tdwInstantSendMessage Protection::dwInstantSendMessage = NULL;
 tLobbySession_GetControllingLobbySession Protection::LobbySession_GetControllingLobbySession = NULL;
 tLobbySession_GetSession Protection::LobbySession_GetSession = NULL;
 tLobbySession_GetClientByClientNum Protection::LobbySession_GetClientByClientNum = NULL;
-tLobbySession_GetClientNetAdrByIndex Protection::LobbySession_GetClientNetAdrByIndex = NULL;
-tLobbyJoin_Reserve Protection::LobbyJoin_Reserve = NULL;
-tCL_GetConfigString Protection::CL_GetConfigString = NULL;
 tCbuf_AddText Protection::Cbuf_AddText = NULL;
 
-const char* sMstart;
-const char* sMdata;
-const char* sMhead;
-const char* sMstate;
-const char* sConnectResponse;
-const char* sRcon;
-const char* sRequestStats;
-const char* sRequestStats2;
-const char* sLoading;
-const char* sRA;
-const char* sV;
-const char* sVT;
-const char* sRelay;
-const char* sLMGI;
-
-SD(targetlobby)
 SD(sourcelobby)
 SD(jointype)
 SD(probedxuid)
@@ -168,15 +133,6 @@ SD(loadout)
 SD(settingssize)
 SD(compstate)
 SD(heartbeatnum)
-SD(nonce)
-SD(nattype)
-SD(lobbies)
-SD(valid)
-SD(hostxuid)
-SD(hostname)
-SD(secid)
-SD(seckey)
-SD(addrbuff)
 
 EXPORT void SetFriendsOnly(bool isFriendsOnly)
 {
@@ -416,30 +372,40 @@ struct download_progress
 };
 
 std::unordered_map<INT32, download_progress> downloadProgress;
+SRWLOCK download_progress_lock = SRWLOCK_INIT;
 void Protection::GetDlcDownloadProgress(INT64 a, INT32 b, INT64* c, INT64* d)
 {
     auto now = GetTickCount64();
 
-    if (downloadProgress.find(b) != downloadProgress.end())
+    AcquireSRWLockExclusive(&download_progress_lock);
+    auto cached = downloadProgress.find(b);
+    if (cached != downloadProgress.end() && now < cached->second.next)
     {
-        if (now >= downloadProgress[b].next)
-        {
-            downloadProgress[b].next = GetTickCount64() + (60 * 5 * 1000);
-            ((void(__fastcall*)(INT64, INT32, INT64*, INT64*))GetOriginalSteamPtr(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_GET_DLC_DOWNLOAD_PROGRESS))(a, b, c, d);
-            downloadProgress[b].a = *c;
-            downloadProgress[b].b = *d;
-            return;
-        }
-        *c = downloadProgress[b].a;
-        *d = downloadProgress[b].b;
+        *c = cached->second.a;
+        *d = cached->second.b;
+        ReleaseSRWLockExclusive(&download_progress_lock);
+        return;
+    }
+    ReleaseSRWLockExclusive(&download_progress_lock);
+
+    // Steam was not up when install() ran, so this slot was never swapped.
+    auto original = GetOriginalSteamPtr(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_GET_DLC_DOWNLOAD_PROGRESS);
+    if (!original)
+    {
+        // Definite values rather than whatever the caller had on the stack.
+        *c = 0;
+        *d = 0;
         return;
     }
 
-    downloadProgress[b] = download_progress();
-    downloadProgress[b].next = GetTickCount64() + (60 * 5 * 1000);
-    ((void(__fastcall*)(INT64, INT32, INT64*, INT64*))GetOriginalSteamPtr(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_GET_DLC_DOWNLOAD_PROGRESS))(a, b, c, d);
-    downloadProgress[b].a = *c;
-    downloadProgress[b].b = *d;
+    ((void(__fastcall*)(INT64, INT32, INT64*, INT64*))original)(a, b, c, d);
+
+    AcquireSRWLockExclusive(&download_progress_lock);
+    download_progress& slot = downloadProgress[b];
+    slot.next = GetTickCount64() + (60 * 5 * 1000);
+    slot.a = *c;
+    slot.b = *d;
+    ReleaseSRWLockExclusive(&download_progress_lock);
 }
 
 __int32 Protection::GetLobbyChatEntry(INT64 api, INT64 csteamidlobby, INT64 chatid, INT64 psteamuserid, INT64 pvdata, INT64 cubdata, INT64 chatentrytype)
@@ -591,6 +557,25 @@ bool Protection::IsBadReadPtr(void* p)
 }
 
 std::unordered_map<__int64, std::unordered_map<int, __int64>> Protection::SteamHAPIHooks;
+// Records a slot's original pointer without publishing anything, so install() can populate the whole
+// map before it swaps the first vtable entry.
+void Protection::RecordSteamOriginal(__int64 hLibrary, int vPointerIndex)
+{
+    auto steamLibrary = *(INT64*)hLibrary;
+    if (!steamLibrary)
+    {
+        return;
+    }
+
+    INT64* vtable = *(INT64**)steamLibrary;
+    if (!vtable)
+    {
+        return;
+    }
+
+    SteamHAPIHooks[hLibrary][vPointerIndex] = *(vtable + vPointerIndex);
+}
+
 void Protection::SwapSteamAPIPointer(__int64 hLibrary, int vPointerIndex, void* CallFuncReplace, bool recordOriginal)
 {
     // A null replacement means "restore a slot that was never swapped", which happens when Steam
@@ -629,7 +614,14 @@ void Protection::SwapSteamAPIPointer(__int64 hLibrary, int vPointerIndex, void* 
 
     if (!VirtualProtect(reinterpret_cast<void*>(vtable + vPointerIndex), 8, PAGE_EXECUTE_READWRITE, &OldProtection))
     {
-        ZLOG("steam: VirtualProtect failed for vtable slot %d (err=%lu)", vPointerIndex, GetLastError());
+        if (Protection::Unloading.load())
+        {
+            ++Protection::UninstallVtableProtectFailures;
+        }
+        else
+        {
+            ZLOG("steam: VirtualProtect failed for vtable slot %d (err=%lu)", vPointerIndex, GetLastError());
+        }
         return;
     }
 
@@ -952,26 +944,10 @@ void load_settings_initial()
 
 __int64 old_IsProcessorFeaturePresent = 0;
 
-void Protection::install()
+// Plain assignments from fixed addresses, split out of install() so they can run before the
+// detours are enabled.
+void Protection::bind_game_pointers()
 {
-    if (Protection::Installed)
-    {
-        return;
-    }
-
-    // The previous watcher must be gone before the flag is cleared, or it never observes Unloading
-    // and a second watcher mutates the same patch_config alongside it. Also stops the handle leak.
-    if (Protection::MainThreadHandle)
-    {
-        WaitForSingleObject(Protection::MainThreadHandle, INFINITE);
-        CloseHandle(Protection::MainThreadHandle);
-        Protection::MainThreadHandle = nullptr;
-    }
-
-    // Cleared here as well as set in uninstall(): otherwise a reinstall spawns a MainThread whose
-    // loop condition is already false, killing the config watcher.
-    Protection::Unloading.store(false);
-
     LobbyMsgRW_PackageInt = (tLobbyMsgRW_PackageInt)PTR_LobbyMsgRW_PackageInt;
     LobbyMsgRW_PackageUChar = (tLobbyMsgRW_PackageUChar)PTR_LobbyMsgRW_PackageUChar;
     LobbyMsgRW_PackageString = (tLobbyMsgRW_PackageString)PTR_LobbyMsgRW_PackageString;
@@ -984,37 +960,34 @@ void Protection::install()
     LobbyMsgRW_PackageElement = (tLobbyMsgRW_PackageElement)PTR_LobbyMsgRW_PackageElement;
     LobbyMsgRW_PackageGlob = (tLobbyMsgRW_PackageGlob)PTR_LobbyMsgRW_PackageGlob;
     MsgMutableClientInfo_Package = (tMsgMutableClientInfo_Package)PTR_MsgMutableClientInfo_Package;
-    ProbeLobbyInfo = (tProbeLobbyInfo)PTR_ProbeLobbyInfo;
     dwInstantHandleLobbyMessage = (tdwInstantHandleLobbyMessage)PTR_dwInstantHandleLobbyMessage;
-    NET_OutOfBandPrint = (tNET_OutOfBandPrint)PTR_NET_OutOfBandPrint;
-    dwCommonAddrToNetadr = (tdwCommonAddrToNetadr)PTR_dwCommonAddrToNetadr;
-    dwRegisterSecIDAndKey = (tdwRegisterSecIDAndKey)PTR_dwRegisterSecIDAndKey;
-    LobbyMsgRW_PrepWriteMsg = (tLobbyMsgRW_PrepWriteMsg)PTR_LobbyMsgRW_PrepWriteMsg;
-    LobbyMsgRW_PackageUShort = (tLobbyMsgRW_PackageUShort)PTR_LobbyMsgRW_PackageUShort;
     LobbyMsgRW_PackageFloat = (tLobbyMsgRW_PackageFloat)PTR_LobbyMsgRW_PackageFloat;
-    MSG_Init = (tMSG_Init)PTR_MSG_Init;
-    MSG_WriteString = (tMSG_WriteString)PTR_MSG_WriteString;
-    MSG_WriteShort = (tMSG_WriteShort)PTR_MSG_WriteShort;
-    MSG_WriteByte = (tMSG_WriteByte)PTR_MSG_WriteByte;
-    MSG_WriteData = (tMSG_WriteData)PTR_MSG_WriteData;
-    Com_ControllerIndex_GetLocalClientNum = (tCom_ControllerIndex_GetLocalClientNum)PTR_Com_ControllerIndex_GetLocalClientNum;
-    Com_LocalClient_GetNetworkID = (tCom_LocalClient_GetNetworkID)PTR_Com_LocalClient_GetNetworkID;
-    NET_OutOfBandData = (tNET_OutOfBandData)PTR_NET_OutOfBandData;
-    LobbyMsgTransport_SendToAdr = (tLobbyMsgTransport_SendToAdr)PTR_LobbyMsgTransport_SendToAdr;
     MSG_ReadData = (tMSG_ReadData)PTR_MSG_ReadData;
     LobbyMsgRW_PrepReadData = (tLobbyMsgRW_PrepReadData)PTR_LobbyMsgRW_PrepReadData;
-    MSG_InfoResponse = (tMSG_InfoResponse)PTR_MSG_InfoResponse;
-    LobbyMsgRW_PackageChar = (tLobbyMsgRW_PackageChar)PTR_LobbyMsgRW_PackageChar;
     I_stricmp = (tI_stricmp)PTR_I_stricmp;
-    dwInstantSendMessage = (tdwInstantSendMessage)PTR_dwInstantSendMessage;
     LobbySession_GetControllingLobbySession = (tLobbySession_GetControllingLobbySession)PTR_LobbySession_GetControllingLobbySession;
     LobbySession_GetSession = (tLobbySession_GetSession)PTR_LobbySession_GetSession;
     LobbySession_GetClientByClientNum = (tLobbySession_GetClientByClientNum)PTR_LobbySession_GetClientByClientNum;
-    LobbySession_GetClientNetAdrByIndex = (tLobbySession_GetClientNetAdrByIndex)PTR_LobbySession_GetClientNetAdrByIndex;
-    LobbyJoin_Reserve = (tLobbyJoin_Reserve)PTR_LobbyJoin_Reserve;
-    CL_GetConfigString = (tCL_GetConfigString)PTR_CL_GetConfigString;
     Cbuf_AddText = (tCbuf_AddText)PTR_Cbuf_AddText;
-    I_stricmp = (tI_stricmp)PTR_I_stricmp;
+}
+
+void Protection::install()
+{
+    if (Protection::Installed)
+    {
+        return;
+    }
+
+    if (Protection::MainThreadHandle)
+    {
+        WaitForSingleObject(Protection::MainThreadHandle, INFINITE);
+        CloseHandle(Protection::MainThreadHandle);
+        Protection::MainThreadHandle = nullptr;
+    }
+
+    Protection::Unloading.store(false);
+
+    Protection::bind_game_pointers();
     if (!TryGetLocalXuid(CachedXUID))
     {
         CachedXUID = 0;
@@ -1022,22 +995,6 @@ void Protection::install()
 
     SetNetworkPassword(0);
 
-    sMstart = "mstart";
-    sMdata = "mdata";
-    sMhead = "mhead";
-    sMstate = "mstate";
-    sConnectResponse = "connectResponseMigration";
-    sRcon = "rcon";
-    sRequestStats = "requeststats";
-    sRequestStats2 = "requeststats\n";
-    sLoading = "loadingnewmap";
-    sRA = "RA";
-    sV = "v";
-    sVT = "vt";
-    sRelay = "relay";
-    sLMGI = "LMgetinfo";
-
-    SS(targetlobby)
     SS(sourcelobby)
     SS(jointype)
     SS(probedxuid)
@@ -1095,8 +1052,6 @@ void Protection::install()
     SS(migratebits)
     SS(lasthosttimems)
     SS(nomineelist)
-    SS(dlcBits)
-    SS(dlcBits)
     SS(serverstatus)
     SS(launchnonce)
     SS(matchhashlow)
@@ -1133,15 +1088,6 @@ void Protection::install()
     SS(settingssize)
     SS(compstate)
     SS(heartbeatnum)
-    SS(nonce)
-    SS(nattype)
-    SS(lobbies)
-    SS(valid)
-    SS(hostxuid)
-    SS(hostname)
-    SS(secid)
-    SS(seckey)
-    SS(addrbuff)
 
     if (*CustomName)
     {
@@ -1157,20 +1103,29 @@ void Protection::install()
 
     old_IsProcessorFeaturePresent = (__int64)&IsProcessorFeaturePresent;
 
-    oReadP2PPacket = (decltype(&ReadP2PPacket))((*(__int64*)(STEAMAPI_NETWORKING + 0x10)));
     IHOOK_INSTALL(IsProcessorFeaturePresent, GetModuleHandleA(0));
 
-    SwapSteamAPIPointer(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_GETUSERNAME, (void*)GetUsernamePtr);
-    SwapSteamAPIPointer(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_VT_NAMEBYXUID, (void*)GetUsernameXUIDPtr);
+    RecordSteamOriginal(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_GETUSERNAME);
+    RecordSteamOriginal(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_VT_NAMEBYXUID);
+    RecordSteamOriginal(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT);
+    RecordSteamOriginal(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT2);
+    RecordSteamOriginal(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_IS_VAC_BANNED);
+    RecordSteamOriginal(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_GET_DLC_DOWNLOAD_PROGRESS);
+    RecordSteamOriginal(STEAMAPI_MATCHMAKING, STEAMAPI_MATCHMAKING_GETLOBBYCHATENTRY);
+    RecordSteamOriginal(STEAMAPI_MATCHMAKING, STEAMAPI_MATCHMAKING_CREATELOBBY);
+    RecordSteamOriginal(STEAMAPI_NETWORKING, STEAMAPI_NETWORKING_READP2PPACKET);
 
-    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT, (void*)GetOwnsContent);
-    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT2, (void*)GetOwnsContent2);
-    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_IS_VAC_BANNED, (void*)IsVacBanned);
-    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_GET_DLC_DOWNLOAD_PROGRESS, (void*)GetDlcDownloadProgress);
+    SwapSteamAPIPointer(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_GETUSERNAME, (void*)GetUsernamePtr, false);
+    SwapSteamAPIPointer(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_VT_NAMEBYXUID, (void*)GetUsernameXUIDPtr, false);
 
-    SwapSteamAPIPointer(STEAMAPI_MATCHMAKING, STEAMAPI_MATCHMAKING_GETLOBBYCHATENTRY, (void*)GetLobbyChatEntry);
-    SwapSteamAPIPointer(STEAMAPI_MATCHMAKING, STEAMAPI_MATCHMAKING_CREATELOBBY, (void*)CreateLobby);
-    SwapSteamAPIPointer(STEAMAPI_NETWORKING, STEAMAPI_NETWORKING_READP2PPACKET, (void*)ReadP2PPacket);
+    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT, (void*)GetOwnsContent, false);
+    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT2, (void*)GetOwnsContent2, false);
+    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_IS_VAC_BANNED, (void*)IsVacBanned, false);
+    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_GET_DLC_DOWNLOAD_PROGRESS, (void*)GetDlcDownloadProgress, false);
+
+    SwapSteamAPIPointer(STEAMAPI_MATCHMAKING, STEAMAPI_MATCHMAKING_GETLOBBYCHATENTRY, (void*)GetLobbyChatEntry, false);
+    SwapSteamAPIPointer(STEAMAPI_MATCHMAKING, STEAMAPI_MATCHMAKING_CREATELOBBY, (void*)CreateLobby, false);
+    SwapSteamAPIPointer(STEAMAPI_NETWORKING, STEAMAPI_NETWORKING_READP2PPACKET, (void*)ReadP2PPacket, false);
 
     *(__int64*)PTR_UpdatePreloadIdleFN = (INT64)CL_SwitchState_Idle_Update;
 
@@ -1330,7 +1285,11 @@ void Protection::uninstall()
         *(__int64*)PTR_lobbymsgprints = Protection::Old_lobbymsgprints;
     }
     SetNetworkPassword(0);
-    Iat_hook_::detour_iat_ptr("IsProcessorFeaturePresent", (void*)old_IsProcessorFeaturePresent);
+    // Checked: 0 means the IAT slot still points into this module, and FreeLibrary follows.
+    if (!Iat_hook_::detour_iat_ptr("IsProcessorFeaturePresent", (void*)old_IsProcessorFeaturePresent))
+    {
+        ++Protection::UninstallIatRestoreFailures;
+    }
 
     SwapSteamAPIPointer(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_GETUSERNAME, (void*)GetOriginalSteamPtr(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_GETUSERNAME), false);
     SwapSteamAPIPointer(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_VT_NAMEBYXUID, (void*)GetOriginalSteamPtr(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_VT_NAMEBYXUID), false);
@@ -2018,7 +1977,7 @@ int Protection::MSG_InfoResponseSafe(Msg_InfoResponse* infoResponse, LobbyMsg* l
 
             if (!infoResponse->lobby[cResponse].isValid)
             {
-                hasNextElement2 = LobbyMsgRW_PackageElement(lm, (i < 2));
+                hasNextElement2 = LobbyMsgRW_PackageElement(lm, ((i + 1) < 2));
                 continue;
             }
 
@@ -2037,7 +1996,7 @@ int Protection::MSG_InfoResponseSafe(Msg_InfoResponse* infoResponse, LobbyMsg* l
             {
                 return 3;
             }
-            hasNextElement2 = LobbyMsgRW_PackageElement(lm, (i < 2));
+            hasNextElement2 = LobbyMsgRW_PackageElement(lm, ((i + 1) < 2));
         }
 
         if (hasNextElement2)
@@ -2045,7 +2004,7 @@ int Protection::MSG_InfoResponseSafe(Msg_InfoResponse* infoResponse, LobbyMsg* l
             return 5;
         }
 
-        hasNextElement = LobbyMsgRW_PackageElement(lm, (cResponse < 2));
+        hasNextElement = LobbyMsgRW_PackageElement(lm, ((cResponse + 1) < 2));
     }
 
     if (hasNextElement || lm->msg.overflowed)
@@ -2090,11 +2049,6 @@ void Protection::ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextR
 
     if (ExceptionRecord->ExceptionAddress == (PVOID)LuaCrash2)
     {
-        if (!UILocalizeDefaultText)
-        {
-            UILocalizeDefaultText = (char*)malloc(4);
-            strcpy_s(UILocalizeDefaultText, 4, "");
-        }
         ContextRecord->Rdx = (INT64)UILocalizeDefaultText;
         ZwContinue(ContextRecord, false);
         return;
@@ -2102,11 +2056,6 @@ void Protection::ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextR
 
     if (ExceptionRecord->ExceptionAddress == (PVOID)LuaCrash3)
     {
-        if (!UILocalizeDefaultText)
-        {
-            UILocalizeDefaultText = (char*)malloc(4);
-            strcpy_s(UILocalizeDefaultText, 4, "");
-        }
         ContextRecord->Rsi = (INT64)UILocalizeDefaultText;
         ZwContinue(ContextRecord, false);
         return;
