@@ -2748,3 +2748,4 @@ static uintptr_t crc_patch_3[] = {
 };
 
 extern bool PatchChecksumComparisons_Precomputed();
+extern bool IsSupportedGameBuild();

@@ -125,6 +125,13 @@ static constexpr ObfuscatedPatch patch_crc_1({ 0x48, 0x31, 0xC9, 0x90, 0x90, 0x9
 static constexpr ObfuscatedPatch patch_crc_2({ 0x48, 0x31, 0xC9, 0x90, 0x90, 0x90, 0x90, 0x90 });
 static constexpr ObfuscatedPatch patch_crc_3({ 0x48, 0x31, 0xC0, 0x48, 0x31, 0xD2 });
 
+static bool g_gameBuildSupported = false;
+
+bool IsSupportedGameBuild()
+{
+	return g_gameBuildSupported;
+}
+
 bool PatchChecksumComparisons_Precomputed()
 {
 	if (!VerifyGameBuild())
@@ -152,6 +159,8 @@ bool PatchChecksumComparisons_Precomputed()
 			MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND);
 		return false;
 	}
+
+	g_gameBuildSupported = true;
 
 	for (auto rva : crc_patch_1)
 		patch_crc_1.Apply((uint8_t*)(REBASE(rva)), PatchAddress);
