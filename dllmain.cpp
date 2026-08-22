@@ -308,8 +308,14 @@ void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
                 ExitProcess(-444);
             }
 
-            // Stamp the version so a crash report can be attributed to a release.
-            fprintf(f, "%s\nCrash log %p\n\n", ZBR_VERSION_FULL, time(NULL));
+            // Stamp the version so a crash report can be attributed to a release, and say plainly
+            // what the stack dump below is. It is raw process memory, so it can contain player
+            // names, Steam IDs and session keys - anyone asked to attach this file should know that
+            // before they post it in public.
+            fprintf(f, "%s\nCrash log %p\n\n"
+                "NOTE: the [address] lines below are raw stack memory. They may contain player\n"
+                "names, Steam IDs and session data. Review before posting this file publicly.\n\n",
+                ZBR_VERSION_FULL, time(NULL));
             INT64 addy = (INT64)ExceptionRecord->ExceptionAddress;
             SavedExceptions[addy] = *ContextRecord;
             while (SavedExceptions.size())
@@ -402,7 +408,7 @@ bool g_patched = false;
 #define HOOK_SIZE_WINE 0x1B
 unsigned __int8 old_data[HOOK_SIZE_WINE];
 unsigned __int8 new_data[HOOK_SIZE_WINE] = { 0x48, 0xB8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x48, 0x89, 0xE2, 0x48, 0x8D, 0x8C, 0x24, 0xF0, 0x04, 0x00, 0x00, 0xFF, 0xD0, 0x90, 0x90, 0x90, 0x90 };
-void wine_installhook(void* func, __int64 kiuserexceptiondispatcher)
+bool wine_installhook(void* func, __int64 kiuserexceptiondispatcher)
 {
     // We have 0x1A (26 bytes) of space to work with. we need to mov rdx, rsp and lea rcx, [rsp+arg_4E8], then mov rax, call and call rax
     auto begin_write = kiuserexceptiondispatcher + 0xB;
@@ -415,9 +421,29 @@ void wine_installhook(void* func, __int64 kiuserexceptiondispatcher)
     *(__int64*)(new_data + 2) = addy;
 
     auto OldProtection = 0ul;
-    VirtualProtect(reinterpret_cast<void*>(begin_write), HOOK_SIZE_WINE, PAGE_EXECUTE_READWRITE, &OldProtection);
+    if (!VirtualProtect(reinterpret_cast<void*>(begin_write), HOOK_SIZE_WINE, PAGE_EXECUTE_READWRITE, &OldProtection))
+    {
+        ZLOG("installHook: wine VirtualProtect failed (err=%lu)", GetLastError());
+        return false;
+    }
+
     memcpy((void*)begin_write, new_data, HOOK_SIZE_WINE);
+
+    // Read back before dropping write access, so a failed patch can be rolled back here rather than
+    // left half-applied in ntdll.
+    const bool written = memcmp((void*)begin_write, new_data, HOOK_SIZE_WINE) == 0;
+    if (!written)
+    {
+        memcpy((void*)begin_write, old_data, HOOK_SIZE_WINE);
+    }
+
     VirtualProtect(reinterpret_cast<void*>(begin_write), HOOK_SIZE_WINE, OldProtection, &OldProtection);
+
+    if (!written)
+    {
+        ZLOG("installHook: wine patch did not verify, rolled back");
+    }
+    return written;
 }
 
 void wine_uninstallhook(__int64 kiuserexceptiondispatcher)
@@ -469,8 +495,13 @@ bool InstallHook(void* func)
         }
         else if (*(__int32*)kiuserexceptiondispatcher == 0x248C8B48)
         {
-        ZLOG("installHook: wine path");
-            wine_installhook(func, kiuserexceptiondispatcher);
+            ZLOG("installHook: wine path");
+
+            if (!wine_installhook(func, kiuserexceptiondispatcher))
+            {
+                return false;
+            }
+
             wine_hook_installed = true;
             return true;
         }
@@ -620,14 +651,7 @@ EXPORT void Unload()
 
                     if (hThread)
                     {
-                        // Past the reserve above, leave the thread running rather than reallocate
-                        // with everything else suspended.
                         const bool suspended = SuspendThread(hThread) != (DWORD)-1;
-                        if (suspended && suspendedThreadIds.size() < suspendedThreadIds.capacity())
-                        {
-                            suspendedThreadIds.push_back(te32.th32ThreadID);
-                        }
-
                         if (suspended)
                         {
                             CONTEXT tContext{};
@@ -637,6 +661,15 @@ EXPORT void Unload()
                                 tContext.Dr7 = 0;
                                 tContext.ContextFlags = CONTEXT_DEBUG_REGISTERS;
                                 SetThreadContext(hThread, &tContext);
+                            }
+
+                            if (suspendedThreadIds.size() < suspendedThreadIds.capacity())
+                            {
+                                suspendedThreadIds.push_back(te32.th32ThreadID);
+                            }
+                            else
+                            {
+                                ResumeThread(hThread);
                             }
                         }
                         CloseHandle(hThread);
