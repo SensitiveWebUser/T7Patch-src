@@ -255,7 +255,9 @@ namespace hooks {
 				translatedString = "";
 			}
 
-			// Returning 0 for an over-long string is shipped behaviour; leave it alone, as no caller
+			// Returning 0 for an over-long string is shipped behaviour; leave it alone. No caller treats
+			// the null return as an error, so "fixing" it to truncate would feed the game a string it
+			// currently never sees.
 			if (strlen(translatedString) > 4095)
 			{
 				return 0;
@@ -419,7 +421,8 @@ namespace hooks {
 				else
 				{
 					// check if the last time we updated the private password was within the past second
-					if (GetTickCount64() <= Protection::PrivatePassword[2] + 1500)
+					if (ZBR_HAS_PREV_PASSWORD
+						&& GetTickCount64() <= Protection::PrivatePassword[2] + 1500)
 					{
 						checksum = checksum ^ (unsigned __int16)Protection::PrivatePassword[1] ^ (unsigned __int16)Protection::PrivatePassword[0];
 						if (*(unsigned __int16*)(newLen + payload) == (unsigned __int16)checksum)
@@ -581,6 +584,17 @@ namespace hooks {
 
 			if (wirePrefix1 == ZBR_PREFIX_BYTE && wirePrefix2 == ZBR_PREFIX_BYTE2)
 			{
+				if (g_trace_enabled.load(std::memory_order_relaxed))
+				{
+					static std::atomic<unsigned int> lastReported{ 0xFFFFFFFFu };
+					const unsigned int prefixPair =
+						((unsigned int)ZBR_PREFIX_BYTE << 8) | (unsigned int)ZBR_PREFIX_BYTE2;
+					if (lastReported.exchange(prefixPair, std::memory_order_relaxed) != prefixPair)
+					{
+						ZLOG("prepReadMsg: ACCEPTED peer message (prefix=%02X,%02X)",
+							ZBR_PREFIX_BYTE, ZBR_PREFIX_BYTE2);
+					}
+				}
 				return true;
 			}
 
@@ -992,7 +1006,11 @@ namespace hooks {
 
 	// Skips the write if VirtualProtect fails, rather than writing anyway as 3.04 did: these are
 	// hardcoded RVAs and this runs before the exception handler is installed, so a write to an
-	// unmapped address is an unrecoverable startup crash. Callers discard the result
+	// unmapped address is an unrecoverable startup crash.
+	//
+	// The bool is returned but no caller reads it, so a failure here is silent. Left that way
+	// deliberately: the Arxan build check runs first, so reaching this with a bad address means
+	// something has already gone wrong that a log line would not help with.
 	static bool patch_bytes(void* address, const void* bytes, size_t size)
 	{
 		DWORD oldProtect = 0;
