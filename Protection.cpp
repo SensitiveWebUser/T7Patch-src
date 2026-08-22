@@ -4,7 +4,7 @@ bool has_set_window_text = false;
 bool Protection::IsFriendsOnly = false;
 bool Protection::IsInjectorlessInstall = true;
 bool Protection::Installed = false;
-volatile bool Protection::Unloading = false;
+std::atomic<bool> Protection::Unloading = false;
 bool Protection::ExceptionHookInstalled = false;
 void* Protection::MainThreadHandle = nullptr;
 thread_local int Protection::InspectorDepth = 0;
@@ -627,7 +627,12 @@ void Protection::SwapSteamAPIPointer(__int64 hLibrary, int vPointerIndex, void* 
         SteamHAPIHooks[hLibrary][vPointerIndex] = *(vtable + vPointerIndex);
     }
 
-    VirtualProtect(reinterpret_cast<void*>(vtable + vPointerIndex), 8, PAGE_EXECUTE_READWRITE, &OldProtection);
+    if (!VirtualProtect(reinterpret_cast<void*>(vtable + vPointerIndex), 8, PAGE_EXECUTE_READWRITE, &OldProtection))
+    {
+        ZLOG("steam: VirtualProtect failed for vtable slot %d (err=%lu)", vPointerIndex, GetLastError());
+        return;
+    }
+
     *reinterpret_cast<void**>(vtable + vPointerIndex) = CallFuncReplace;
     VirtualProtect(reinterpret_cast<void*>(vtable + vPointerIndex), 8, OldProtection, &OldProtection);
 }
@@ -919,7 +924,7 @@ DWORD WINAPI MainThread(LPVOID lpParam)
 
     // Unload() suspends this thread, uninstalls, then resumes it, so the flag is seen on the next
     // iteration. Without it the loop keeps running inside a module that is about to be freed.
-    while (!Protection::Unloading)
+    while (!Protection::Unloading.load())
     {
         if (user_config.update_watcher_time(PATCH_CONFIG_LOCATION))
         {
@@ -965,7 +970,7 @@ void Protection::install()
 
     // Cleared here as well as set in uninstall(): otherwise a reinstall spawns a MainThread whose
     // loop condition is already false, killing the config watcher.
-    Protection::Unloading = false;
+    Protection::Unloading.store(false);
 
     LobbyMsgRW_PackageInt = (tLobbyMsgRW_PackageInt)PTR_LobbyMsgRW_PackageInt;
     LobbyMsgRW_PackageUChar = (tLobbyMsgRW_PackageUChar)PTR_LobbyMsgRW_PackageUChar;
@@ -1318,7 +1323,7 @@ void Protection::uninstall()
         return;
     }
     Protection::Installed = false;
-    Protection::Unloading = true;
+    Protection::Unloading.store(true);
 
     if (*(__int64*)PTR_lobbymsgprints == 0xFFEEDDCC44332212)
     {
@@ -2166,7 +2171,9 @@ namespace Iat_hook_
             return 0;
 
         DWORD old_rights, new_rights = PAGE_READWRITE;
-        VirtualProtect(func_ptr, sizeof(uintptr_t), new_rights, &old_rights);
+        if (!VirtualProtect(func_ptr, sizeof(uintptr_t), new_rights, &old_rights))
+            return 0;
+
         uintptr_t ret = (uintptr_t)*func_ptr;
         *func_ptr = newfunction;
         VirtualProtect(func_ptr, sizeof(uintptr_t), old_rights, &new_rights);

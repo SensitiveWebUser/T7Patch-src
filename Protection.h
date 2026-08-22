@@ -66,7 +66,7 @@ public:
 	static bool IsMTLPatchEnabled;
 	static bool IsInjectorlessInstall;
 	static bool Installed;
-	static volatile bool Unloading;
+	static std::atomic<bool> Unloading;
 	static bool ExceptionHookInstalled;
 	static void* MainThreadHandle;
 	static thread_local int InspectorDepth;

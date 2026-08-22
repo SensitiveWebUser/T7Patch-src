@@ -51,7 +51,7 @@ void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
     // Logged only for unusual exceptions
     if (ExceptionRecord && ContextRecord
         && ExceptionRecord->ExceptionCode != 0x80000003
-        && !Protection::Unloading)
+        && !Protection::Unloading.load())
     {
         ZLOG("except code=%08X addr=%p rip=%p rsp=%p rcx=%p",
             ExceptionRecord->ExceptionCode, ExceptionRecord->ExceptionAddress,
@@ -451,7 +451,12 @@ void wine_uninstallhook(__int64 kiuserexceptiondispatcher)
     auto begin_write = kiuserexceptiondispatcher + 0xB;
 
     auto OldProtection = 0ul;
-    VirtualProtect(reinterpret_cast<void*>(begin_write), HOOK_SIZE_WINE, PAGE_EXECUTE_READWRITE, &OldProtection);
+    if (!VirtualProtect(reinterpret_cast<void*>(begin_write), HOOK_SIZE_WINE, PAGE_EXECUTE_READWRITE, &OldProtection))
+    {
+        ZLOG("uninstallHook: wine VirtualProtect failed (err=%lu)", GetLastError());
+        return;
+    }
+
     memcpy((void*)begin_write, old_data, HOOK_SIZE_WINE);
     VirtualProtect(reinterpret_cast<void*>(begin_write), HOOK_SIZE_WINE, OldProtection, &OldProtection);
 }
@@ -530,9 +535,15 @@ void UninstallHook()
     {
         auto ptr = g_exceptionDispatchSlot;
         auto OldProtection = 0ul;
-        VirtualProtect(reinterpret_cast<void*>(ptr), 8, PAGE_EXECUTE_READWRITE, &OldProtection);
-        *reinterpret_cast<void**>(ptr) = g_exceptionDispatchOriginal;
-        VirtualProtect(reinterpret_cast<void*>(ptr), 8, OldProtection, &OldProtection);
+        if (VirtualProtect(reinterpret_cast<void*>(ptr), 8, PAGE_EXECUTE_READWRITE, &OldProtection))
+        {
+            *reinterpret_cast<void**>(ptr) = g_exceptionDispatchOriginal;
+            VirtualProtect(reinterpret_cast<void*>(ptr), 8, OldProtection, &OldProtection);
+        }
+        else
+        {
+            ZLOG("uninstallHook: VirtualProtect failed for dispatch slot (err=%lu)", GetLastError());
+        }
         g_exceptionDispatchSlot = 0;
         g_exceptionDispatchOriginal = nullptr;
     }
@@ -627,7 +638,7 @@ EXPORT void zbr_run_gamemode_lui(const char* input)
 EXPORT void Unload()
 {
     ZLOG("unload: begin");
-    Protection::Unloading = true;
+    Protection::Unloading.store(true);
 
     std::vector<DWORD> suspendedThreadIds;
     // Reserved up front so push_back cannot allocate inside the loop below: by then every other
