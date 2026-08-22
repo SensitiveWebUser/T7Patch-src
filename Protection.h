@@ -75,6 +75,9 @@ public:
 	{
 		InspectorScope() { ++Protection::InspectorDepth; }
 		~InspectorScope() { --Protection::InspectorDepth; }
+		
+		InspectorScope(const InspectorScope&) = delete;
+		InspectorScope& operator=(const InspectorScope&) = delete;
 	};
 
 	static void install();

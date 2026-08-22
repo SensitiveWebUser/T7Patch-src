@@ -194,6 +194,12 @@ EXPORT void SetPlayerName(const char* name)
     strcpy_s(Protection::CustomName, name);
     Protection::CustomName[sizeof(Protection::CustomName) - 1] = 0;
 
+    if (!IsSupportedGameBuild())
+    {
+        ZLOG("cfg: playername not written to game memory build not verified");
+        return;
+    }
+
     strncpy_s((char*)(pUserData + 0x8), 16, Protection::CustomName, sizeof(Protection::CustomName));
     strncpy_s((char*)(pNameBuffer), 16, Protection::CustomName, sizeof(Protection::CustomName));
 }
@@ -204,6 +210,7 @@ EXPORT void SetNetworkPassword(const char* pass)
 {
     std::string trimmed = pass ? pass : "";
     trim_config_field(trimmed);
+    const size_t trimmedLength = trimmed.length();
 
     if (trimmed.empty())
     {
@@ -216,15 +223,21 @@ EXPORT void SetNetworkPassword(const char* pass)
     ZLOG("cfg: password %s, prefix=%02X,%02X", trimmed.empty() ? "cleared" : "SET",
         ZBR_PREFIX_BYTE, ZBR_PREFIX_BYTE2);
 
+    // Scrub the plaintext out of this stack frame now that only the hash is needed.
+    if (!trimmed.empty())
+    {
+        SecureZeroMemory(&trimmed[0], trimmed.size());
+    }
+
     // TODO: raise the injector's limit rather than truncating here. Its password box sets
     // MaxLength to 15 (MainForm::InitializeComponent) while this route accepts far more, so a
     // longer password silently hashes differently for a GUI user than for a config user. Passwords
     // should not be capped at 15. Until the injector is rebuilt, report the mismatch instead of
     // hiding it.
-    if (trimmed.length() > ZBR_INJECTOR_PASSWORD_MAXLEN)
+    if (trimmedLength > ZBR_INJECTOR_PASSWORD_MAXLEN)
     {
-        ZLOG("cfg: password is %zu chars - the injector's box stops at %u, so a player entering it "
-            "there will not match this one", trimmed.length(), ZBR_INJECTOR_PASSWORD_MAXLEN);
+        ZLOG("cfg: password is %u chars - the injector's box stops at %u, so a player entering it "
+            "there will not match this one", (unsigned)trimmedLength, ZBR_INJECTOR_PASSWORD_MAXLEN);
     }
 }
 
@@ -622,8 +635,8 @@ void Protection::SwapSteamAPIPointer(__int64 hLibrary, int vPointerIndex, void* 
 INT64 Protection::GetOriginalSteamPtr(__int64 hLibrary, int vtIndex)
 {
     // find() rather than operator[]: the latter inserts an entry for slots that were never hooked,
-    // and it allocates uninstall() runs with other threads suspended, where that can deadlock on
-    // the heap lock.
+    // and it allocates. uninstall() runs with every other thread suspended, where allocating can
+    // deadlock on the heap lock.
     auto lib = SteamHAPIHooks.find(hLibrary);
     if (lib == SteamHAPIHooks.end())
     {
@@ -641,7 +654,8 @@ INT64 Protection::GetOriginalSteamPtr(__int64 hLibrary, int vtIndex)
 
 bool fs_exists(const char* filename)
 {
-    if (!std::filesystem::exists(filename))
+    std::error_code ec;
+    if (!std::filesystem::exists(filename, ec) || ec)
     {
         return false;
     }
@@ -710,7 +724,13 @@ struct patch_config
         }
 
         exists = true;
-        auto time = std::filesystem::last_write_time(path);
+
+        std::error_code ec;
+        auto time = std::filesystem::last_write_time(path, ec);
+        if (ec)
+        {
+            return did_exist_before != exists;
+        }
 
         bool was_same_time = modified == time;
         modified = time;
@@ -795,13 +815,22 @@ struct patch_config
                     break;
                 }
 
-                seen_isfriendsonly = true;
-                std::istringstream ivalread(val);
-                ivalread >> staged_isfriendsonly;
-                if (ivalread.fail())
+                const std::string lowered = to_lower(val);
+                if (lowered == "1" || lowered == "true" || lowered == "yes" || lowered == "on")
                 {
-                    // Malformed: fail open, so nobody is left unable to turn this setting off.
+                    seen_isfriendsonly = true;
+                    staged_isfriendsonly = 1;
+                }
+                else if (lowered == "0" || lowered == "false" || lowered == "no" || lowered == "off")
+                {
+                    seen_isfriendsonly = true;
                     staged_isfriendsonly = 0;
+                }
+                else
+                {
+                    // Unrecognised: leave whatever is currently in force and say so, rather than
+                    // guessing a direction for a setting whose whole job is to keep people out.
+                    ZLOG("cfg: isfriendsonly value not understood, keeping current setting");
                 }
             }
             break;
