@@ -9,7 +9,6 @@ x86/
 *.exp
 *.lib
 *.dll
-!detours/detours.lib
 !minhook/lib/*.lib
 
 # Visual Studio
