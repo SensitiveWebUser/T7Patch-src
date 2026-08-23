@@ -6,7 +6,7 @@ unsigned __int32 GSCUHashing::canon_hash(const char* input)
 	const char* _input = input;
 	while (*_input)
 	{
-		char c = tolower(*_input);
+		char c = char_to_lower(*_input);
 		hash = ((c + hash) ^ ((c + hash) << 10)) + (((c + hash) ^ ((c + hash) << 10)) >> 6);
 		_input++;
 	}
@@ -23,7 +23,7 @@ unsigned __int64 GSCUHashing::canon_hash64(const char* input)
 
 	while (*_input)
 	{
-		hash = (hash ^ tolower(*_input)) * prime;
+		hash = (hash ^ char_to_lower(*_input)) * prime;
 		_input++;
 	}
 

@@ -3,39 +3,22 @@
 
 #define OFFSET(x) ((INT64)GetModuleHandleA(NULL) + (INT64)x)
 #define REBASE(x) OFFSET(x)
-#define _DOFFSET(x) x
 #define EXPORT extern "C" __declspec(dllexport)
 
 #define SD(x) const char* s ## x;
 #define SS(x) s##x = #x;
 #define STR(x) s##x
 
-#define OD(x) __int64 llp ## x;
-#define OS(x) llp ## x = x;
-#define OG(x) llp ## x
-
-typedef bool(__fastcall* tReadP2PPacket)(uintptr_t thisptr, void* pub_dest, unsigned int cub_dest, unsigned int* cub_msg_size, unsigned __int64* steam_id_remote, int n_channel);
-typedef char* (__fastcall* tGetPersonaName) (DWORD_PTR _this);
-typedef __int64(__fastcall* tLiveSteam_FilterPersonaName)(char* buffer, int size, char asciionly);
-extern tReadP2PPacket oReadP2PPacket;
-extern tGetPersonaName oGetPersonaName;
-extern tLiveSteam_FilterPersonaName oLiveSteam_FilterPersonaName;
 
 #define SCRVM_Error REBASE(0x12EA4E0)
-#define OFF_SCRVM_RuntimeError REBASE(0x12EA450)
 #define SCRVM_FS REBASE(0x513DD30)
 #define LuaCrash1 REBASE(0x1C9F121)
 #define LuaCrash1Rip REBASE(0x1C9F2CE)
 #define LuaCrash2 REBASE(0x221CEC3)
 #define LuaCrash3 REBASE(0x221C726)
-#define SCR_VmErrorString REBASE(0x52660F0)
-#define SCR_VMContext REBASE(0x5124850)
 #define INT3_2_BO3 REBASE(0x1059)
-#define BO3_HWND REBASE(0x17DF74A0)
 #define ROP_RETN REBASE(0x1048)
 #define s_playerData_ptr REBASE(0x3390190)
-#define PTR_LobbyVM REBASE(0x157588D0)
-#define PTR_CL_DispatchConnectionless OFFSET(0x134CDCD)
 #define PTR_Name1 OFFSET(0x113A4970)
 #define PTR_Name2 OFFSET(0x113A48F0)
 #define PTR_UpdatePreloadIdleFN REBASE(0x32A75A8)
@@ -55,7 +38,6 @@ extern tLiveSteam_FilterPersonaName oLiveSteam_FilterPersonaName;
 #define PTR_NET_OutOfBandPrint REBASE(0x211B310)
 #define PTR_dwCommonAddrToNetadr REBASE(0x143C380)
 #define PTR_dwRegisterSecIDAndKey REBASE(0x143E140)
-#define PTR_LobbyMsgTansport_SendOutOfBand REBASE(0x1EEC360)
 #define PTR_LobbyMsgRW_PrepWriteMsg REBASE(0x1EEA560)
 #define PTR_LobbyMsgRW_PackageUShort REBASE(0x1EEA4B0)
 #define PTR_LobbySession_GetSession REBASE(0x1EC1650)
@@ -77,7 +59,6 @@ extern tLiveSteam_FilterPersonaName oLiveSteam_FilterPersonaName;
 #define PTR_LobbyMsgRW_PackageChar REBASE(0x1EEA300)
 #define PTR_LobbyMsgRW_PackageFloat REBASE(0x1EEA390)
 #define PTR_dwInstantSendMessage REBASE(0x143A830)
-#define PTR_dwInstantDispatchMessage REBASE(0x143A620)
 #define PTR_I_stricmp REBASE(0x227CB20)
 #define PTR_Cbuf_AddText REBASE(0x20DFF50)
 #define PTR_LobbySession_GetClientNetAdrByIndex REBASE(0x1EBFCC0)
@@ -98,7 +79,6 @@ extern tLiveSteam_FilterPersonaName oLiveSteam_FilterPersonaName;
 #define PTR_saveLobbyMsgExceptAddy REBASE(0x1EEBF74)
 #define PTR_Cmp_TokenizeStringInternal REBASE(0x20E2A3E + 0x3)
 #define Sys_Checksum(msg, size) ((unsigned __int16(__fastcall*)(const unsigned char*, __int32))REBASE(0x211F430))(msg, size)
-#define BigShort(val) ((__int16(__fastcall*)(__int16))REBASE(0x227B4A0))(val)
 
 const static auto flsomeWeirdCharacterIndex = reinterpret_cast<float(__fastcall*)(__int64 a1, int a2, int a3)>REBASE(0x22C9650);
 const static auto CL_ConnectionlessCMD = reinterpret_cast<bool(__fastcall*)(int clientNum, netadr_t * from, msg_t * msg)>OFFSET(0x134CD70);
@@ -124,11 +104,9 @@ const static auto Dvar_SetFromStringByName = reinterpret_cast<std::uintptr_t(__f
 const static auto dwInstantDispatchMessage = reinterpret_cast<__int64(__fastcall*)(__int64 SenderId, unsigned int controllerIndex, __int64 msg, unsigned int messageSize)>OFFSET(0x143A620);
 const static auto LivePresence_Serialize = reinterpret_cast<__int64(__fastcall*)(__int64 a1, __int64 a2)>OFFSET(0x1E85450);
 const static auto MSG_BeginReading = reinterpret_cast<void(*)(msg_t*)>OFFSET(0x20FC900);
-const static auto MSG_InfoResponse = reinterpret_cast<bool(*)(void*, LobbyMsg*)>OFFSET(0x1ED5B40);
 const static auto MSG_InitReadOnly = reinterpret_cast<void(*)(msg_t*, const char*, int)>OFFSET(0x20FCC10);
 const static auto MSG_ReadByte = reinterpret_cast<std::uint8_t(*)(msg_t*)>OFFSET(0x20FD050);
 const static auto MSG_ReadData = reinterpret_cast<void(*)(msg_t*, void*, int)>OFFSET(0x20FD0B0);
-const static auto Live_IsUserSignedInToDemonware = reinterpret_cast<bool(*)(const ControllerIndex_t)>REBASE(0x1E013D0);
 const static auto LobbyMsg_HandleIM = reinterpret_cast<std::uintptr_t(__fastcall*)(unsigned int targetController, __int64 senderXuid, void* buff, int len)>OFFSET(0x1EEA130);
 const static auto LobbyMsgRW_PackageInt = reinterpret_cast<bool(__fastcall*)(LobbyMsg * lobbyMsg, const char* key, __int32* val)>PTR_LobbyMsgRW_PackageInt;
 const static auto LobbyMsgRW_PackageUInt = reinterpret_cast<bool(__fastcall*)(LobbyMsg * lobbyMsg, const char* key, unsigned __int32* val)>PTR_LobbyMsgRW_PackageUInt;
@@ -139,7 +117,6 @@ const static auto LobbyHost_IsHost = reinterpret_cast<bool(__fastcall*)(__int32)
 const static auto Scr_AddString = reinterpret_cast<void(__fastcall*)(__int32, const char*)>(REBASE(0x12E9A50));
 const static auto Scr_ExecEntThread = reinterpret_cast<__int32(__fastcall*)(void*, void*, __int32)>(REBASE(0x1B20280));
 const static auto Scr_FreeThread = reinterpret_cast<void(__fastcall*)(__int32, __int32)>(REBASE(0x12EAB70));
-const static auto SV_Cmd_ConcatArgs = reinterpret_cast<const char* (__fastcall*)(__int32)>(REBASE(0x1972BA0));
 const static auto SV_Cmd_ArgvBuffer = reinterpret_cast<void(__fastcall*)(__int32, char*, __int32)>(REBASE(0x20E2FD0));
 const static auto UI_Model_AllocateNode = reinterpret_cast<__int32(__fastcall*)(__int32 ancestorIndex, const char* path, bool persistent)>REBASE(0x200CD00);
 const static auto UI_Model_CreateModelFromPath = reinterpret_cast<__int32(__fastcall*)(__int64 parentNodeIndex, const char* path)>REBASE(0x200CFC0);

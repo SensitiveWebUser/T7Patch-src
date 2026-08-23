@@ -17,12 +17,10 @@ namespace hooks {
 		}
 
 		bool hkLiveInventory_AreExtraSlotsPurchased(ControllerIndex_t controllerIndex) {
-		
-			if (SPOOF_UNLOCK_ALL == true) return 999;
-			
-				return true;
 
-			return LiveInventory_AreExtraSlotsPurchased(controllerIndex);
+			// Always true, matching shipped 3.03+ behaviour: a stray `return true` already made the
+			// call to the original unreachable. Do not "restore" that call.
+			return true;
 		}
 
 		const char* hkInfo_ValueForKey(char* a1, __int64 a2)
@@ -40,11 +38,7 @@ namespace hooks {
 
 		bool hkLiveEntitlements_IsEntitlementActiveForController(ControllerIndex_t controllerIndex, int incentiveId) {
 
-			if (SPOOF_UNLOCK_ALL == true) return 999;
-				return true; 
-
-
-			return LiveEntitlements_IsEntitlementActiveForController(controllerIndex, incentiveId);
+			return true;
 		}
 
 
@@ -106,6 +100,7 @@ namespace hooks {
 			{
 				if (!Protection::IsFriendByXUIDUncached(recepientXUID))
 				{
+					ZLOG("invite: DROP non-friend xuid=%p", (void*)recepientXUID);
 					return;
 				}
 			}
@@ -118,6 +113,7 @@ namespace hooks {
 			{
 				if (!Protection::IsFriendByXUIDUncached(recepientXUID))
 				{
+					ZLOG("invite: DROP non-friend xuid=%p", (void*)recepientXUID);
 					return;
 				}
 			}
@@ -130,6 +126,7 @@ namespace hooks {
 			{
 				if (!Protection::IsFriendByXUIDUncached(recepientXUID))
 				{
+					ZLOG("sendJoinInfo: DROP non-friend xuid=%p", (void*)recepientXUID);
 					return 0;
 				}
 			}
@@ -145,25 +142,30 @@ namespace hooks {
 
 		bool hkLive_UserGetName(ControllerIndex_t controllerIndex, char* buf, int bufSize) {
 
-			__int64 v3; // rbx
-			int* v6; // rax
-			int v9; // [rsp+40h] [rbp+8h] BYREF
+			if (!buf || bufSize <= 0)
+			{
+				return 0;
+			}
 
-			v3 = bufSize;
-			v9 = bufSize;
-			Memset(buf, 0i64, bufSize);
-			v6 = &v9;
-
-			Live_Base_UserGetName((UINT8*)buf, *v6, 1);
+			Memset(buf, 0LL, bufSize);
+			Live_Base_UserGetName((UINT8*)buf, bufSize, 1);
 
 			return 1;
 		}
 
 		float hkflsomeWeirdCharacterIndex(__int64 a1, int a2, int a3) {
 
-			__int64 v3; // r9
+			if (!a1 || a2 < 0) {
+				return -1.0f;
+			}
 
-			v3 = *(DWORD64*)(a1 + 24i64 * a2 + 56);
+			auto slot = (DWORD64*)(a1 + 24LL * a2 + 56);
+			if (Protection::IsBadReadPtr(slot) || Protection::IsBadReadPtr((char*)slot + 7)) {
+				return -1.0f; // matches this hook's own fallthrough below
+			}
+
+			__int64 v3 = *slot; // r9
+
 			if (v3) {
 				return flsomeWeirdCharacterIndex(a1, a2, a3);
 			}
@@ -178,10 +180,17 @@ namespace hooks {
 			auto v8 = *v7;
 			auto message = **(CHAR***)&v7[2 * v8 + 34];
 
+			if (!message)
+			{
+				return 1;
+			}
+
 			// From v2.04
 			auto mode = Com_SessionMode_GetModeName();
 
-			if ((!Protection::I_stricmp(message, "requeststats") || !Protection::I_stricmp(message, "requeststats\n")) && !Protection::I_stricmp(mode, "CP"))
+			// mode can be null, and testing it first short-circuits before the message comparisons.
+			if (mode && !Protection::I_stricmp(mode, "CP")
+				&& (!Protection::I_stricmp(message, "requeststats") || !Protection::I_stricmp(message, "requeststats\n")))
 			{
 				return CL_ConnectionlessCMD(clientNum, from, msg);
 			}
@@ -198,8 +207,11 @@ namespace hooks {
 		{
 
 			constexpr auto mspreload_command = "mspreload";
-			std::vector<int> config_strings = { 3514, 3627 };
+			// static: this hook is on a per-frame path, so the list must not be rebuilt per call.
+			static const std::vector<int> config_strings = { 3514, 3627 };
 
+			// Campaign bypass from 859c4aa, left as written. Do not narrow it: the store below is
+			// all this hook does and it is skipped in CP either way, so there is nothing to gain.
 			auto mode = Com_SessionMode_GetModeName();
 			if (mode && !Protection::I_stricmp(mode, "CP"))
 			{
@@ -208,7 +220,8 @@ namespace hooks {
 
 			if (is_in_number_array(configStringIndex, config_strings))
 			{
-				if (auto config_string{ CL_GetConfigString(configStringIndex) }; is_equal(config_string, mspreload_command, std::strlen(mspreload_command), false))
+				if (auto config_string{ CL_GetConfigString(configStringIndex) };
+					config_string && is_equal(config_string, mspreload_command, std::strlen(mspreload_command), false))
 				{
 					// Loadside attempt caught, return empty string to prevent crash
 					CL_StoreConfigString(configStringIndex, "");
@@ -242,6 +255,9 @@ namespace hooks {
 				translatedString = "";
 			}
 
+			// Returning 0 for an over-long string is shipped behaviour; leave it alone. No caller treats
+			// the null return as an error, so "fixing" it to truncate would feed the game a string it
+			// currently never sees.
 			if (strlen(translatedString) > 4095)
 			{
 				return 0;
@@ -320,9 +336,13 @@ namespace hooks {
 
 		bool hkUI_DoModelStringReplacement(__int32 controllerIndex, char* element, const char* source, char* dest, unsigned int destSize)
 		{
+			if (!dest || !destSize)
+			{
+				return false;
+			}
+
 			char input[4096]{};
-			strcpy_s(input, source);
-			input[4095] = 0;
+			strncpy_s(input, source ? source : "", _TRUNCATE);
 			int max = strlen(input);
 
 			bool b_replace = false;
@@ -361,8 +381,7 @@ namespace hooks {
 
 			if (b_replace)
 			{
-				strcpy_s(dest, destSize, input);
-				*(dest + destSize - 1) = 0;
+				strncpy_s(dest, destSize, input, _TRUNCATE);
 				return true;
 			}
 
@@ -402,7 +421,8 @@ namespace hooks {
 				else
 				{
 					// check if the last time we updated the private password was within the past second
-					if (GetTickCount64() <= Protection::PrivatePassword[2] + 1500)
+					if (ZBR_HAS_PREV_PASSWORD
+						&& GetTickCount64() <= Protection::PrivatePassword[2] + 1500)
 					{
 						checksum = checksum ^ (unsigned __int16)Protection::PrivatePassword[1] ^ (unsigned __int16)Protection::PrivatePassword[0];
 						if (*(unsigned __int16*)(newLen + payload) == (unsigned __int16)checksum)
@@ -444,7 +464,12 @@ namespace hooks {
 			{
 				return Live_SystemInfo(controllerIndex, infoType, outputString, outputLen);
 			}
-			strcpy_s(outputString, outputLen, ZBR_VERSION_FULL);
+			if (!outputString || outputLen <= 0)
+			{
+				return false;
+			}
+
+			strncpy_s(outputString, outputLen, ZBR_VERSION_FULL, _TRUNCATE);
 			return true;
 		}
 
@@ -467,31 +492,19 @@ namespace hooks {
 				packetType = MSG_ReadByte(&msg);
 			}
 
-			char* msgData = *(char**)(message + 8);
-			__int32 msgSize = *(__int32*)(message + 0x1C);
-			__int32 msgRead = *(__int32*)(message + 0x24);
-			const auto remainingSize = msgSize - msgRead;
-
 			// check packet for the following cases:
 			if (packetType == 0x65 || packetType == 0x6D) // cbuf
 			{
 				is_valid_packet = false;
 			}
 			else if (packetType == 0x66) // is a joinRequest
-			{		
-				if ((msgSize - msgRead) != 0x64) // has a bad message size which leads to error message
-				{
-					is_valid_packet = false;
-				}
-
-				char* packetData = msgData + msgRead;
-				if (is_valid_packet && !*(__int32*)packetData) // msg_type_join_request which leads to crash
-				{
-					is_valid_packet = false;
-				}
+			{
+				is_valid_packet = false;
 			}
 
-			if (is_valid_packet && (packetType == 0x68) && Protection::CheckPendingInfoRequests(senderXuid, (msg_t*)message))
+			ZLOG("dispatch: type=0x%02X valid=%d xuid=%p size=%u",
+				packetType, (int)is_valid_packet, (void*)senderXuid, messageSize);
+			if (is_valid_packet && (packetType == 0x68) && Protection::CheckPendingInfoRequests(senderXuid, message, messageSize))
 			{
 				return 0;
 			}
@@ -542,8 +555,8 @@ namespace hooks {
 		{
 			if (LobbyMsgRW_PrepWriteMsg(lobbyMsg, data, length, msgType))
 			{
-				// ALOG("sending pkt %d", msgType);
-				if (ZBR_PREFIX_BYTE)
+
+				if (ZBR_HAS_PASSWORD)
 				{
 					((void(__fastcall*)(__int64, unsigned char))PTR_MSG_WriteByte)(lobbyMsg, ZBR_PREFIX_BYTE);
 					((void(__fastcall*)(__int64, unsigned char))PTR_MSG_WriteByte)(lobbyMsg, ZBR_PREFIX_BYTE2);
@@ -555,12 +568,54 @@ namespace hooks {
 
 		bool hkLobbyMsgRW_PrepReadMsg(__int64 lm)
 		{
-			if (LobbyMsgRW_PrepReadMsg(lm) && (!ZBR_PREFIX_BYTE || ((((unsigned char(__fastcall*)(__int64))PTR_MSG_ReadByte)(lm) == ZBR_PREFIX_BYTE) && (((unsigned char(__fastcall*)(__int64))PTR_MSG_ReadByte)(lm) == ZBR_PREFIX_BYTE2)) ))
+			if (!LobbyMsgRW_PrepReadMsg(lm))
 			{
-				// ALOG("valid pkt %d", *(__int32*)(lm + 0x38));
 				return true;
 			}
 
+			// No password means no prefix was written, so there is nothing to check.
+			if (!ZBR_HAS_PASSWORD)
+			{
+				return true;
+			}
+
+			const unsigned char wirePrefix1 = ((unsigned char(__fastcall*)(__int64))PTR_MSG_ReadByte)(lm);
+			const unsigned char wirePrefix2 = ((unsigned char(__fastcall*)(__int64))PTR_MSG_ReadByte)(lm);
+
+			if (wirePrefix1 == ZBR_PREFIX_BYTE && wirePrefix2 == ZBR_PREFIX_BYTE2)
+			{
+				if (g_trace_enabled.load(std::memory_order_relaxed))
+				{
+					static std::atomic<unsigned int> lastReported{ 0xFFFFFFFFu };
+					const unsigned int prefixPair =
+						((unsigned int)ZBR_PREFIX_BYTE << 8) | (unsigned int)ZBR_PREFIX_BYTE2;
+					if (lastReported.exchange(prefixPair, std::memory_order_relaxed) != prefixPair)
+					{
+						ZLOG("prepReadMsg: ACCEPTED peer message (prefix=%02X,%02X)",
+							ZBR_PREFIX_BYTE, ZBR_PREFIX_BYTE2);
+					}
+				}
+				return true;
+			}
+
+			// Grace window, as in hkSys_VerifyPacketChecksum: peers rotate the password at
+			// unsynchronised moments, so briefly accept the previous one. PrivatePassword[0] holds
+			// it, [2] is the rotation time.
+			const unsigned char prevPrefix1 = (unsigned char)((Protection::PrivatePassword[0] & 0xFF0000) >> 16);
+			const unsigned char prevPrefix2 = (unsigned char)((Protection::PrivatePassword[0] & 0xFF000000) >> 24);
+
+			if (ZBR_HAS_PREV_PASSWORD
+				&& GetTickCount64() <= (unsigned __int64)Protection::PrivatePassword[2] + 1500
+				&& wirePrefix1 == prevPrefix1 && wirePrefix2 == prevPrefix2)
+			{
+				return true;
+			}
+
+			msg_t* msg = (msg_t*)lm;
+			msg->readcount = msg->cursize;
+
+			ZLOG("prepReadMsg: DROPPED wire=%02X,%02X expected=%02X,%02X",
+				wirePrefix1, wirePrefix2, ZBR_PREFIX_BYTE, ZBR_PREFIX_BYTE2);
 			return true;
 		}
 
@@ -573,10 +628,18 @@ namespace hooks {
 			{
 				if (*val < 0 || *val > 1)
 				{
-					//XLOG("DROP LOBBYTYPE");
 					return false;
 				}
 			}
+
+			// The inspectors are best-effort reimplementations of the game's parsers: a failure
+			// there means "could not model this message", not "malformed packet", and propagating
+			// it drops legitimate join traffic. The game's own calls get the real result.
+			if (Protection::InspectorDepth > 0)
+			{
+				return true;
+			}
+
 			return result;
 		}
 
@@ -646,7 +709,8 @@ namespace hooks {
 				}
 				else
 				{
-					strcpy_s(szMenuName, BG_Cache_GetScriptMenuNameForIndex(0, menuIndex));
+					const char* menuName = BG_Cache_GetScriptMenuNameForIndex(0, menuIndex);
+					strncpy_s(szMenuName, menuName ? menuName : "", _TRUNCATE);
 				}
 				SV_Cmd_ArgvBuffer(3, mres, 1024);
 			}
@@ -715,11 +779,22 @@ namespace hooks {
 				}
 				else
 				{
-					strcpy_s(szMenuName, BG_Cache_GetScriptMenuNameForIndex(0, menuIndex));
+					const char* menuName = BG_Cache_GetScriptMenuNameForIndex(0, menuIndex);
+					strncpy_s(szMenuName, menuName ? menuName : "", _TRUNCATE);
 				}
 				SV_Cmd_ArgvBuffer(3, mres, 1024);
 				auto eventIndex = (unsigned int)atoi(mres);
-				strcpy_s(mres, BG_Cache_GetEventStringNameForIndex(0, eventIndex));
+				// eventIndex comes off the wire and the table has 256 entries; "bad" is the
+				// sentinel this function already uses for unusable input.
+				if (eventIndex >= 256u)
+				{
+					strcpy_s(mres, "bad");
+				}
+				else
+				{
+					const char* eventName = BG_Cache_GetEventStringNameForIndex(0, eventIndex);
+					strncpy_s(mres, eventName ? eventName : "", _TRUNCATE);
+				}
 			}
 
 			if (!Protection::I_stricmp(mres, "badspawn"))
@@ -868,120 +943,194 @@ namespace hooks {
 		}				
 	}
 
+	// The object's vptr slot and the game's real vtable address, so unload can restore it.
+	static uintptr_t* g_lobbyVptrSlot = nullptr;
+	static uintptr_t g_origLobbyVtable = 0;
+
 	void ApplyVMTHooks()
 	{
-
+		// Redirect this object's vptr to a private copy of the vtable and patch the copy. Never
+		// write the game's own vtable: it sits in Arxan-checksummed read-only data, and patching
+		// slot 24 in place derailed execution to a bogus address on the lobby path.
 		auto ptr = *(uintptr_t*)DW_LOBBY;
-		auto vmt = **(uintptr_t***)(ptr + 1384);
+		if (!ptr)
+		{
+			ZLOG("vmt: SKIPPED lobby object not ready");
+			return;
+		}
+
+		auto vptrSlot = *(uintptr_t**)(ptr + 1384);
+		if (!vptrSlot)
+		{
+			ZLOG("vmt: SKIPPED null vptr slot");
+			return;
+		}
+
+		auto vmt = (uintptr_t*)*vptrSlot;
+		if (!vmt)
+		{
+			ZLOG("vmt: SKIPPED null vtable");
+			return;
+		}
 
 		auto vtable_buf = new uintptr_t[50];
-		for (auto count = 0; count < 50; ++count) {
+		for (auto count = 0; count < 50; ++count)
+		{
 			vtable_buf[count] = vmt[count];
 		}
 
-		**(uintptr_t**)(ptr + 1384) = (uintptr_t)vtable_buf;
-		*(uintptr_t*)(**(uintptr_t**)(ptr + 1384) + 192) = (uintptr_t)functions::Global_InstantMessage;
+		vtable_buf[24] = (uintptr_t)functions::Global_InstantMessage;
 
+		g_lobbyVptrSlot = vptrSlot;
+		g_origLobbyVtable = (uintptr_t)vmt;
+		*vptrSlot = (uintptr_t)vtable_buf;
+	}
+
+	void RemoveVMTHooks()
+	{
+		if (!g_lobbyVptrSlot || !g_origLobbyVtable)
+		{
+			return;
+		}
+
+		// Point the object back at the game's real vtable, otherwise unloading leaves it
+		// dispatching through a table in a freed module. The slot is in the game's own object,
+		// not its read-only image, so no VirtualProtect is needed.
+		*g_lobbyVptrSlot = g_origLobbyVtable;
+
+		// The copy is leaked deliberately: 400 bytes once per process, and another thread may
+		// still be inside a call dispatched through it.
+		g_lobbyVptrSlot = nullptr;
+		g_origLobbyVtable = 0;
+	}
+
+	// Skips the write if VirtualProtect fails, rather than writing anyway as 3.04 did: these are
+	// hardcoded RVAs and this runs before the exception handler is installed, so a write to an
+	// unmapped address is an unrecoverable startup crash.
+	//
+	// The bool is returned but no caller reads it, so a failure here is silent. Left that way
+	// deliberately: the Arxan build check runs first, so reaching this with a bad address means
+	// something has already gone wrong that a log line would not help with.
+	static bool patch_bytes(void* address, const void* bytes, size_t size)
+	{
+		DWORD oldProtect = 0;
+		if (!VirtualProtect(address, size, PAGE_EXECUTE_READWRITE, &oldProtect))
+		{
+			return false;
+		}
+
+		memcpy(address, bytes, size);
+		FlushInstructionCache(GetCurrentProcess(), address, size);
+
+		DWORD dummy = 0;
+		VirtualProtect(address, size, oldProtect, &dummy);
+		return true;
 	}
 
 	void ApplyMemoryPatches()
 	{
-		auto OldProtection = 0ul;
-		// SL fix (nop out the calls to com_error)
-		VirtualProtect((__int32*)REBASE(0x1964766), 5, PAGE_EXECUTE_READWRITE, &OldProtection);
-		*(__int32*)REBASE(0x1964766) = 0x90909090;
-		*(char*)(REBASE(0x1964766) + 4) = 0x90;
-		VirtualProtect((__int32*)REBASE(0x1964766), 5, OldProtection, &OldProtection);
+		static const unsigned char nop5[5] = { 0x90, 0x90, 0x90, 0x90, 0x90 };
+		static const unsigned char movzx_word = 0xB7; // 0F BF movsx r32,r/m16 -> 0F B7 movzx
+		static const unsigned char movzx_byte = 0xB6; // 0F BE movsx r32,r/m8  -> 0F B6 movzx
+		static const unsigned char token_limit = 0x2F;
+		static const __int32 above_normal = 0x00008000;
 
 		// SL fix (nop out the calls to com_error)
-		VirtualProtect((__int32*)REBASE(0x19646A7), 5, PAGE_EXECUTE_READWRITE, &OldProtection);
-		*(__int32*)REBASE(0x19646A7) = 0x90909090;
-		*(char*)(REBASE(0x19646A7) + 4) = 0x90;
-		VirtualProtect((__int32*)REBASE(0x19646A7), 5, OldProtection, &OldProtection);
+		patch_bytes((void*)REBASE(0x1964766), nop5, sizeof(nop5));
+		patch_bytes((void*)REBASE(0x19646A7), nop5, sizeof(nop5));
 
-		VirtualProtect((__int32*)REBASE(0x1EEACF2), 4, PAGE_EXECUTE_READWRITE, &OldProtection);
-		*(char*)REBASE(0x1EEACF2 + 1) = 0xB7; // fix movsx issue with package readglob
-		VirtualProtect((__int32*)REBASE(0x1EEACF2), 4, OldProtection, &OldProtection);
+		// fix movsx issue with package readglob
+		patch_bytes((void*)REBASE(0x1EEACF2 + 1), &movzx_word, 1);
 
-		VirtualProtect((__int32*)PTR_Cmp_TokenizeStringInternal, 1, PAGE_EXECUTE_READWRITE, &OldProtection);
-		*(char*)PTR_Cmp_TokenizeStringInternal = 0x2F;
-		VirtualProtect((__int32*)PTR_Cmp_TokenizeStringInternal, 1, OldProtection, &OldProtection);
+		patch_bytes((void*)PTR_Cmp_TokenizeStringInternal, &token_limit, 1);
 
-		// process priority
-		VirtualProtect((__int32*)REBASE(0x22BC1CD), 4, PAGE_EXECUTE_READWRITE, &OldProtection);
-		*(__int32*)REBASE(0x22BC1CD) = 0x00008000; // above normal
-		VirtualProtect((__int32*)REBASE(0x22BC1CD), 4, OldProtection, &OldProtection);
-
-		VirtualProtect((__int32*)REBASE(0x22BC1D2), 4, PAGE_EXECUTE_READWRITE, &OldProtection);
-		*(__int32*)REBASE(0x22BC1D2) = 0x00008000; // above normal
-		VirtualProtect((__int32*)REBASE(0x22BC1D2), 4, OldProtection, &OldProtection);
+		// process priority: above normal
+		patch_bytes((void*)REBASE(0x22BC1CD), &above_normal, sizeof(above_normal));
+		patch_bytes((void*)REBASE(0x22BC1D2), &above_normal, sizeof(above_normal));
 
 		// movsx -> movzx
-		VirtualProtect((__int32*)REBASE(0x1F21EF8), 1, PAGE_EXECUTE_READWRITE, &OldProtection);
-		*(char*)REBASE(0x1F21EF8) = 0xb6;
-		VirtualProtect((__int32*)REBASE(0x1F21EF8), 1, OldProtection, &OldProtection);
-
-		// movsx -> movzx
-		VirtualProtect((__int32*)REBASE(0x1CA4C84), 1, PAGE_EXECUTE_READWRITE, &OldProtection);
-		*(char*)REBASE(0x1CA4C84) = 0xb6;
-		VirtualProtect((__int32*)REBASE(0x1CA4C84), 1, OldProtection, &OldProtection);
+		patch_bytes((void*)REBASE(0x1F21EF8), &movzx_byte, 1);
+		patch_bytes((void*)REBASE(0x1CA4C84), &movzx_byte, 1);
 	}
+
+	// MH_CreateHook's status was discarded at every call site below. A hook that fails to install
+	// removes whatever it was protecting with no crash and no message.
+	static void CreateHookChecked(LPVOID target, LPVOID detour, LPVOID* original, const char* detourName)
+	{
+		const MH_STATUS status = MH_CreateHook(target, detour, original);
+		if (status != MH_OK)
+		{
+			ZLOG("hook: FAILED %s (MH_STATUS=%d)", detourName, (int)status);
+		}
+	}
+
+	// A macro only so the log carries the detour's name: #detour needs the preprocessor.
+#define CREATE_HOOK(target, detour, original) CreateHookChecked((target), (LPVOID)(detour), (original), #detour)
 
 	void ApplyHooks()
 	{
-		MH_CreateHook((LPVOID)REBASE(0x1EEA560), functions::hkLobbyMsgRW_PrepWriteMsg, (LPVOID*)&LobbyMsgRW_PrepWriteMsg);
-		MH_CreateHook((LPVOID)REBASE(0x1EEB8D0), functions::hkLobbyMsgRW_PrepReadMsg, (LPVOID*)&LobbyMsgRW_PrepReadMsg);
-		MH_CreateHook((LPVOID)REBASE(0x20E31C0), functions::hkCOD_GetBuildTitle, (LPVOID*)&COD_GetBuildTitle);
-		MH_CreateHook((LPVOID)REBASE(0x1E016C0), functions::hkLive_SystemInfo, (LPVOID*)&Live_SystemInfo);
-		MH_CreateHook((LPVOID)REBASE(0x1EDFA60), functions::hkLobbyTypes_GetMsgTypeName, (LPVOID*)&LobbyTypes_GetMsgTypeName);
-		MH_CreateHook((LPVOID)REBASE(0x2BC4EB0), functions::hkqmemcpy, (LPVOID*)&qmemcpy);
-		MH_CreateHook((LPVOID)REBASE(0x22C9650), functions::hkflsomeWeirdCharacterIndex, (LPVOID*)&flsomeWeirdCharacterIndex);
-		MH_CreateHook((LPVOID)REBASE(0x221CE90), functions::hkSEH_ReplaceDirectiveInStringWithBinding, (LPVOID*)&SEH_ReplaceDirectiveInStringWithBinding);
-		MH_CreateHook((LPVOID)REBASE(0x1EEA3E0), functions::hkLobbyMsgRW_PackageInt, (LPVOID*)&LobbyMsgRW_PackageInt);
-		MH_CreateHook((LPVOID)REBASE(0x1EEA490), functions::hkLobbyMsgRW_PackageUInt, (LPVOID*)&LobbyMsgRW_PackageUInt);
-		MH_CreateHook((LPVOID)REBASE(0x1EEA450), functions::hkLobbyMsgRW_PackageUChar, (LPVOID*)&LobbyMsgRW_PackageUChar);
-		MH_CreateHook((LPVOID)REBASE(0x1F27400), functions::hkUI_DoModelStringReplacement, (LPVOID*)&UI_DoModelStringReplacement);
-		MH_CreateHook((LPVOID)REBASE(0x1EA9C80), functions::hkLiveSteam_InitServer, (LPVOID*)&LiveSteam_InitServer);
-		MH_CreateHook((LPVOID)REBASE(0x195F100), functions::hkCMD_MenuReponse_f, (LPVOID*)&CMD_MenuResponse_f);
-		MH_CreateHook((LPVOID)REBASE(0x195EFA0), functions::hk_CMD_MenuResponseCached_f, (LPVOID*)&CMD_MenuResponseCached_f);
-		MH_CreateHook((LPVOID)REBASE(0x200CF00), functions::hkUI_Model_GetModelFromPath_0, (LPVOID*)&UI_Model_GetModelFromPath_0);
-		MH_CreateHook((LPVOID)REBASE(0x200D5B0), functions::hkUI_Model_GetModelFromPath, (LPVOID*)&UI_Model_GetModelFromPath);
-		MH_CreateHook((LPVOID)REBASE(0x200CFC0), functions::hkUI_Model_CreateModelFromPath, (LPVOID*)&UI_Model_CreateModelFromPath);
-		MH_CreateHook((LPVOID)REBASE(0x200CD00), functions::hkUI_Model_AllocateNode, (LPVOID*)&UI_Model_AllocateNode);
-		MH_CreateHook((LPVOID)REBASE(0x211F5A0), functions::hkSys_VerifyPacketChecksum, (LPVOID*)&Sys_VerifyPacketChecksum);
-		MH_CreateHook((LPVOID)REBASE(0x211F500), functions::hkSys_ChecksumCopy, (LPVOID*)&Sys_ChecksumCopy);
-		MH_CreateHook((LPVOID)REBASE(0x1EEA940), functions::hkLobbyMsgRW_PrintMessage, (LPVOID*)&LobbyMsgRW_PrintMessage);
-		MH_CreateHook((LPVOID)REBASE(0x1EEA680), functions::hkLobbyMsgRW_PrintDebugMessage, (LPVOID*)&LobbyMsgRW_PrintDebugMessage);
-		MH_CreateHook((LPVOID)REBASE(0x1EF8A60), functions::hkExecLuaCMD, (LPVOID*)&ExecLuaCMD);
-		MH_CreateHook((LPVOID)REBASE(0x1EBB200), functions::hkLive_UserGetName, (LPVOID*)&Live_UserGetName);
-		MH_CreateHook((LPVOID)&__report_gsfailure, functions::__report_gsfailure_hook, (LPVOID*)&pOriginalGSFailure);
-		MH_CreateHook((LPVOID)REBASE(0x143A620), functions::hkdwInstantDispatchMessage, (LPVOID*)&dwInstantDispatchMessage);
-		MH_CreateHook((LPVOID)REBASE(0x134CD70), functions::hkCL_ConnectionlessCMD, (LPVOID*)&CL_ConnectionlessCMD);
-		MH_CreateHook((LPVOID)REBASE(0x1E85450), functions::hkLivePresence_Serialize, (LPVOID*)&LivePresence_Serialize);
-		MH_CreateHook((LPVOID)REBASE(0x1321130), functions::hkCL_GetConfigString, (LPVOID*)&CL_GetConfigString);
-		MH_CreateHook((LPVOID)REBASE(0x20CB0C0), functions::hkMods_SubscribeUGC, (LPVOID*)&Mods_SubscribeUGC);
-		MH_CreateHook((LPVOID)REBASE(0x1E19B30), functions::hkLiveInvites_AcceptInvite, (LPVOID*)&LiveInvites_AcceptInvite);
-		MH_CreateHook((LPVOID)REBASE(0x1E724A0), functions::hkLiveInvites_SendJoinInfo, (LPVOID*)&LiveInvites_SendJoinInfo);
-		MH_CreateHook((LPVOID)REBASE(0x1E72040), functions::hkLiveInvites_JoinMessageAction, (LPVOID*)&LiveInvites_JoinMessageAction);
-		MH_CreateHook((LPVOID)REBASE(0x1EA4E30), functions::hkUI_BrowserOpen, (LPVOID*)&UI_BrowserOpen);
+		CREATE_HOOK((LPVOID)REBASE(0x1EEA560), functions::hkLobbyMsgRW_PrepWriteMsg, (LPVOID*)&LobbyMsgRW_PrepWriteMsg);
+		CREATE_HOOK((LPVOID)REBASE(0x1EEB8D0), functions::hkLobbyMsgRW_PrepReadMsg, (LPVOID*)&LobbyMsgRW_PrepReadMsg);
+		CREATE_HOOK((LPVOID)REBASE(0x20E31C0), functions::hkCOD_GetBuildTitle, (LPVOID*)&COD_GetBuildTitle);
+		CREATE_HOOK((LPVOID)REBASE(0x1E016C0), functions::hkLive_SystemInfo, (LPVOID*)&Live_SystemInfo);
+		CREATE_HOOK((LPVOID)REBASE(0x1EDFA60), functions::hkLobbyTypes_GetMsgTypeName, (LPVOID*)&LobbyTypes_GetMsgTypeName);
+		CREATE_HOOK((LPVOID)REBASE(0x2BC4EB0), functions::hkqmemcpy, (LPVOID*)&qmemcpy);
+		CREATE_HOOK((LPVOID)REBASE(0x22C9650), functions::hkflsomeWeirdCharacterIndex, (LPVOID*)&flsomeWeirdCharacterIndex);
+		CREATE_HOOK((LPVOID)REBASE(0x221CE90), functions::hkSEH_ReplaceDirectiveInStringWithBinding, (LPVOID*)&SEH_ReplaceDirectiveInStringWithBinding);
+		CREATE_HOOK((LPVOID)REBASE(0x1EEA3E0), functions::hkLobbyMsgRW_PackageInt, (LPVOID*)&LobbyMsgRW_PackageInt);
+		CREATE_HOOK((LPVOID)REBASE(0x1EEA490), functions::hkLobbyMsgRW_PackageUInt, (LPVOID*)&LobbyMsgRW_PackageUInt);
+		CREATE_HOOK((LPVOID)REBASE(0x1EEA450), functions::hkLobbyMsgRW_PackageUChar, (LPVOID*)&LobbyMsgRW_PackageUChar);
+		CREATE_HOOK((LPVOID)REBASE(0x1F27400), functions::hkUI_DoModelStringReplacement, (LPVOID*)&UI_DoModelStringReplacement);
+		CREATE_HOOK((LPVOID)REBASE(0x1EA9C80), functions::hkLiveSteam_InitServer, (LPVOID*)&LiveSteam_InitServer);
+		CREATE_HOOK((LPVOID)REBASE(0x195F100), functions::hkCMD_MenuReponse_f, (LPVOID*)&CMD_MenuResponse_f);
+		CREATE_HOOK((LPVOID)REBASE(0x195EFA0), functions::hk_CMD_MenuResponseCached_f, (LPVOID*)&CMD_MenuResponseCached_f);
+		CREATE_HOOK((LPVOID)REBASE(0x200CF00), functions::hkUI_Model_GetModelFromPath_0, (LPVOID*)&UI_Model_GetModelFromPath_0);
+		CREATE_HOOK((LPVOID)REBASE(0x200D5B0), functions::hkUI_Model_GetModelFromPath, (LPVOID*)&UI_Model_GetModelFromPath);
+		CREATE_HOOK((LPVOID)REBASE(0x200CFC0), functions::hkUI_Model_CreateModelFromPath, (LPVOID*)&UI_Model_CreateModelFromPath);
+		CREATE_HOOK((LPVOID)REBASE(0x200CD00), functions::hkUI_Model_AllocateNode, (LPVOID*)&UI_Model_AllocateNode);
+		CREATE_HOOK((LPVOID)REBASE(0x211F5A0), functions::hkSys_VerifyPacketChecksum, (LPVOID*)&Sys_VerifyPacketChecksum);
+		CREATE_HOOK((LPVOID)REBASE(0x211F500), functions::hkSys_ChecksumCopy, (LPVOID*)&Sys_ChecksumCopy);
+		CREATE_HOOK((LPVOID)REBASE(0x1EEA940), functions::hkLobbyMsgRW_PrintMessage, (LPVOID*)&LobbyMsgRW_PrintMessage);
+		CREATE_HOOK((LPVOID)REBASE(0x1EEA680), functions::hkLobbyMsgRW_PrintDebugMessage, (LPVOID*)&LobbyMsgRW_PrintDebugMessage);
+		CREATE_HOOK((LPVOID)REBASE(0x1EF8A60), functions::hkExecLuaCMD, (LPVOID*)&ExecLuaCMD);
+		CREATE_HOOK((LPVOID)REBASE(0x1EBB200), functions::hkLive_UserGetName, (LPVOID*)&Live_UserGetName);
+		CREATE_HOOK((LPVOID)&__report_gsfailure, functions::__report_gsfailure_hook, (LPVOID*)&pOriginalGSFailure);
+		CREATE_HOOK((LPVOID)REBASE(0x143A620), functions::hkdwInstantDispatchMessage, (LPVOID*)&dwInstantDispatchMessage);
+		CREATE_HOOK((LPVOID)REBASE(0x134CD70), functions::hkCL_ConnectionlessCMD, (LPVOID*)&CL_ConnectionlessCMD);
+		CREATE_HOOK((LPVOID)REBASE(0x1E85450), functions::hkLivePresence_Serialize, (LPVOID*)&LivePresence_Serialize);
+		CREATE_HOOK((LPVOID)REBASE(0x1321130), functions::hkCL_GetConfigString, (LPVOID*)&CL_GetConfigString);
+		CREATE_HOOK((LPVOID)REBASE(0x20CB0C0), functions::hkMods_SubscribeUGC, (LPVOID*)&Mods_SubscribeUGC);
+		CREATE_HOOK((LPVOID)REBASE(0x1E19B30), functions::hkLiveInvites_AcceptInvite, (LPVOID*)&LiveInvites_AcceptInvite);
+		CREATE_HOOK((LPVOID)REBASE(0x1E724A0), functions::hkLiveInvites_SendJoinInfo, (LPVOID*)&LiveInvites_SendJoinInfo);
+		CREATE_HOOK((LPVOID)REBASE(0x1E72040), functions::hkLiveInvites_JoinMessageAction, (LPVOID*)&LiveInvites_JoinMessageAction);
+		CREATE_HOOK((LPVOID)REBASE(0x1EA4E30), functions::hkUI_BrowserOpen, (LPVOID*)&UI_BrowserOpen);
 		/*MH_CreateHook((LPVOID)REBASE(0xA7DE0), functions::hkBG_Cache_GetScriptMenuNameForIndex, (LPVOID*)&BG_Cache_GetScriptMenuNameForIndex);
 		MH_CreateHook((LPVOID)REBASE(0xA78A0), functions::hkBG_Cache_GetEventStringNameForIndex, (LPVOID*)&BG_Cache_GetEventStringNameForIndex);
 		MH_CreateHook((LPVOID)REBASE(0xA7AB0), functions::hkBG_Cache_GetLocStringNameForIndex, (LPVOID*)&BG_Cache_GetLocStringNameForIndex);
 		MH_CreateHook((LPVOID)REBASE(0xA7A00), functions::hkBG_Cache_GetLUIMenuForIndex, (LPVOID*)&BG_Cache_GetLUIMenuForIndex);
 		MH_CreateHook((LPVOID)REBASE(0xA7990), functions::hkBG_Cache_GetLUIMenuDataForIndex, (LPVOID*)&BG_Cache_GetLUIMenuDataForIndex);*/
-		MH_CreateHook((LPVOID)REBASE(0x1EAAD60), functions::hkUserHasLicenseForApp, (LPVOID*)&UserHasLicenseForApp);
-		MH_CreateHook((LPVOID)REBASE(0x1DFCC60), functions::hkLiveInventory_GetItemQuantity, (LPVOID*)&LiveInventory_GetItemQuantity);
-		MH_CreateHook((LPVOID)REBASE(0x1E06110), functions::hkLiveEntitlements_IsEntitlementActiveForController, (LPVOID*)&LiveEntitlements_IsEntitlementActiveForController);
-		MH_CreateHook((LPVOID)REBASE(0x1DFC580), functions::hkLiveInventory_AreExtraSlotsPurchased, (LPVOID*)&LiveInventory_AreExtraSlotsPurchased);
-		MH_CreateHook((LPVOID)REBASE(0x1DFDFE0), functions::hkLiveInventory_IsValid, (LPVOID*)&LiveInventory_IsValid);
-		MH_CreateHook((LPVOID)REBASE(0x227BDA0), functions::hkInfo_ValueForKey, (LPVOID*)&Info_ValueForKey);
+		CREATE_HOOK((LPVOID)REBASE(0x1EAAD60), functions::hkUserHasLicenseForApp, (LPVOID*)&UserHasLicenseForApp);
+		CREATE_HOOK((LPVOID)REBASE(0x1DFCC60), functions::hkLiveInventory_GetItemQuantity, (LPVOID*)&LiveInventory_GetItemQuantity);
+		CREATE_HOOK((LPVOID)REBASE(0x1E06110), functions::hkLiveEntitlements_IsEntitlementActiveForController, (LPVOID*)&LiveEntitlements_IsEntitlementActiveForController);
+		CREATE_HOOK((LPVOID)REBASE(0x1DFC580), functions::hkLiveInventory_AreExtraSlotsPurchased, (LPVOID*)&LiveInventory_AreExtraSlotsPurchased);
+		CREATE_HOOK((LPVOID)REBASE(0x1DFDFE0), functions::hkLiveInventory_IsValid, (LPVOID*)&LiveInventory_IsValid);
+		CREATE_HOOK((LPVOID)REBASE(0x227BDA0), functions::hkInfo_ValueForKey, (LPVOID*)&Info_ValueForKey);
 
-		MH_EnableHook(MH_ALL_HOOKS);
+		const MH_STATUS enableStatus = MH_EnableHook(MH_ALL_HOOKS);
+		if (enableStatus != MH_OK)
+		{
+			ZLOG("hook: MH_EnableHook FAILED (MH_STATUS=%d)", (int)enableStatus);
+		}
 	}
 
 	void DestroyHooks()
 	{
-		MH_DisableHook(MH_ALL_HOOKS);
+		const MH_STATUS disableStatus = MH_DisableHook(MH_ALL_HOOKS);
+		if (disableStatus != MH_OK)
+		{
+			ZLOG("hook: MH_DisableHook FAILED (MH_STATUS=%d) - detours may still be live", (int)disableStatus);
+		}
+		RemoveVMTHooks();
 	}
 
 }
