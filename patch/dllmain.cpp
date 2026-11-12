@@ -461,7 +461,7 @@ void UninstallHook()
                 auto ptr = __fn_ptr_hook;
                 auto OldProtection = 0ul;
                 VirtualProtect(reinterpret_cast<void*>(ptr), 8, PAGE_EXECUTE_READWRITE, &OldProtection);
-                *reinterpret_cast<void**>(ptr) = __nullsub;
+                *reinterpret_cast<void**>(ptr) = reinterpret_cast<void*>(__nullsub);
                 VirtualProtect(reinterpret_cast<void*>(ptr), 8, OldProtection, &OldProtection);
             }
         }
@@ -505,7 +505,7 @@ void RunPatching()
 	hooks::ApplyMemoryPatches();
 
 	// Apply Exception Handler
-    InstallHook(ExceptHook);
+    InstallHook((void*)ExceptHook);
 
 	// Install the protection hooks
     Protection::install();

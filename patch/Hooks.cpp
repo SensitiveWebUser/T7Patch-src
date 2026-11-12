@@ -223,7 +223,7 @@ namespace hooks {
 
 			v3 = bufSize;
 			v9 = bufSize;
-			Memset(buf, 0i64, bufSize);
+			Memset(buf, 0LL, bufSize);
 			v6 = &v9;
 
 			Live_Base_UserGetName((UINT8*)buf, *v6, 1);
@@ -235,7 +235,7 @@ namespace hooks {
 
 			__int64 v3; // r9
 
-			v3 = *(DWORD64*)(a1 + 24i64 * a2 + 56);
+			v3 = *(DWORD64*)(a1 + 24LL * a2 + 56);
 			if (v3) {
 				return flsomeWeirdCharacterIndex(a1, a2, a3);
 			}
@@ -1084,54 +1084,54 @@ namespace hooks {
 	{
 		campaign_fixes::InstallHooks();
 		lua_symbols::InstallHooks();
-		MH_CreateHook((LPVOID)REBASE(0x1EEA560), functions::hkLobbyMsgRW_PrepWriteMsg, (LPVOID*)&LobbyMsgRW_PrepWriteMsg);
-		MH_CreateHook((LPVOID)REBASE(0x1EEB8D0), functions::hkLobbyMsgRW_PrepReadMsg, (LPVOID*)&LobbyMsgRW_PrepReadMsg);
-		MH_CreateHook((LPVOID)REBASE(0x20E31C0), functions::hkCOD_GetBuildTitle, (LPVOID*)&COD_GetBuildTitle);
-		MH_CreateHook((LPVOID)REBASE(0x1E016C0), functions::hkLive_SystemInfo, (LPVOID*)&Live_SystemInfo);
-		MH_CreateHook((LPVOID)REBASE(0x1EDFA60), functions::hkLobbyTypes_GetMsgTypeName, (LPVOID*)&LobbyTypes_GetMsgTypeName);
-		MH_CreateHook((LPVOID)REBASE(0x2BC4EB0), functions::hkqmemcpy, (LPVOID*)&qmemcpy);
-		MH_CreateHook((LPVOID)REBASE(0x22C9650), functions::hkflsomeWeirdCharacterIndex, (LPVOID*)&flsomeWeirdCharacterIndex);
-		MH_CreateHook((LPVOID)REBASE(0x221CE90), functions::hkSEH_ReplaceDirectiveInStringWithBinding, (LPVOID*)&SEH_ReplaceDirectiveInStringWithBinding);
-		MH_CreateHook((LPVOID)REBASE(0x1EEA3E0), functions::hkLobbyMsgRW_PackageInt, (LPVOID*)&LobbyMsgRW_PackageInt);
-		MH_CreateHook((LPVOID)REBASE(0x1EEA490), functions::hkLobbyMsgRW_PackageUInt, (LPVOID*)&LobbyMsgRW_PackageUInt);
-		MH_CreateHook((LPVOID)REBASE(0x1EEA450), functions::hkLobbyMsgRW_PackageUChar, (LPVOID*)&LobbyMsgRW_PackageUChar);
-		MH_CreateHook((LPVOID)REBASE(0x1F27400), functions::hkUI_DoModelStringReplacement, (LPVOID*)&UI_DoModelStringReplacement);
-		MH_CreateHook((LPVOID)REBASE(0x1EA9C80), functions::hkLiveSteam_InitServer, (LPVOID*)&LiveSteam_InitServer);
-		MH_CreateHook((LPVOID)REBASE(0x195F100), functions::hkCMD_MenuReponse_f, (LPVOID*)&CMD_MenuResponse_f);
-		MH_CreateHook((LPVOID)REBASE(0x195EFA0), functions::hk_CMD_MenuResponseCached_f, (LPVOID*)&CMD_MenuResponseCached_f);
-		MH_CreateHook((LPVOID)REBASE(0x200CF00), functions::hkUI_Model_GetModelFromPath_0, (LPVOID*)&UI_Model_GetModelFromPath_0);
-		MH_CreateHook((LPVOID)REBASE(0x200D5B0), functions::hkUI_Model_GetModelFromPath, (LPVOID*)&UI_Model_GetModelFromPath);
-		MH_CreateHook((LPVOID)REBASE(0x200CFC0), functions::hkUI_Model_CreateModelFromPath, (LPVOID*)&UI_Model_CreateModelFromPath);
-		MH_CreateHook((LPVOID)REBASE(0x200CD00), functions::hkUI_Model_AllocateNode, (LPVOID*)&UI_Model_AllocateNode);
-		MH_CreateHook((LPVOID)REBASE(0x211F5A0), functions::hkSys_VerifyPacketChecksum, (LPVOID*)&Sys_VerifyPacketChecksum);
-		MH_CreateHook((LPVOID)REBASE(0x211F500), functions::hkSys_ChecksumCopy, (LPVOID*)&Sys_ChecksumCopy);
-		MH_CreateHook((LPVOID)REBASE(0x1EEA940), functions::hkLobbyMsgRW_PrintMessage, (LPVOID*)&LobbyMsgRW_PrintMessage);
-		MH_CreateHook((LPVOID)REBASE(0x1EEA680), functions::hkLobbyMsgRW_PrintDebugMessage, (LPVOID*)&LobbyMsgRW_PrintDebugMessage);
-		MH_CreateHook((LPVOID)REBASE(0x1EF8A60), functions::hkExecLuaCMD, (LPVOID*)&ExecLuaCMD);
-		MH_CreateHook((LPVOID)REBASE(0x1EBB200), functions::hkLive_UserGetName, (LPVOID*)&Live_UserGetName);
-		MH_CreateHook((LPVOID)&__report_gsfailure, functions::__report_gsfailure_hook, (LPVOID*)&pOriginalGSFailure);
-		MH_CreateHook((LPVOID)REBASE(0x143A620), functions::hkdwInstantDispatchMessage, (LPVOID*)&dwInstantDispatchMessage);
-		MH_CreateHook((LPVOID)REBASE(0x134CD70), functions::hkCL_ConnectionlessCMD, (LPVOID*)&CL_ConnectionlessCMD);
-		MH_CreateHook((LPVOID)REBASE(0x1E85450), functions::hkLivePresence_Serialize, (LPVOID*)&LivePresence_Serialize);
-		MH_CreateHook((LPVOID)REBASE(0x1321130), functions::hkCL_GetConfigString, (LPVOID*)&CL_GetConfigString);
-		MH_CreateHook((LPVOID)REBASE(0x20CB0C0), functions::hkMods_SubscribeUGC, (LPVOID*)&Mods_SubscribeUGC);
-		MH_CreateHook((LPVOID)REBASE(0x1E19B30), functions::hkLiveInvites_AcceptInvite, (LPVOID*)&LiveInvites_AcceptInvite);
-		MH_CreateHook((LPVOID)REBASE(0x1E724A0), functions::hkLiveInvites_SendJoinInfo, (LPVOID*)&LiveInvites_SendJoinInfo);
-		MH_CreateHook((LPVOID)REBASE(0x1E72040), functions::hkLiveInvites_JoinMessageAction, (LPVOID*)&LiveInvites_JoinMessageAction);
-		MH_CreateHook((LPVOID)REBASE(0x1EA4E30), functions::hkUI_BrowserOpen, (LPVOID*)&UI_BrowserOpen);
-		/*MH_CreateHook((LPVOID)REBASE(0xA7DE0), functions::hkBG_Cache_GetScriptMenuNameForIndex, (LPVOID*)&BG_Cache_GetScriptMenuNameForIndex);
-		MH_CreateHook((LPVOID)REBASE(0xA78A0), functions::hkBG_Cache_GetEventStringNameForIndex, (LPVOID*)&BG_Cache_GetEventStringNameForIndex);
-		MH_CreateHook((LPVOID)REBASE(0xA7AB0), functions::hkBG_Cache_GetLocStringNameForIndex, (LPVOID*)&BG_Cache_GetLocStringNameForIndex);
-		MH_CreateHook((LPVOID)REBASE(0xA7A00), functions::hkBG_Cache_GetLUIMenuForIndex, (LPVOID*)&BG_Cache_GetLUIMenuForIndex);
-		MH_CreateHook((LPVOID)REBASE(0xA7990), functions::hkBG_Cache_GetLUIMenuDataForIndex, (LPVOID*)&BG_Cache_GetLUIMenuDataForIndex);*/
-		MH_CreateHook((LPVOID)REBASE(0x1EAAD60), functions::hkUserHasLicenseForApp, (LPVOID*)&UserHasLicenseForApp);
-		MH_CreateHook((LPVOID)REBASE(0x1DFCC60), functions::hkLiveInventory_GetItemQuantity, (LPVOID*)&LiveInventory_GetItemQuantity);
-		MH_CreateHook((LPVOID)REBASE(0x1E06110), functions::hkLiveEntitlements_IsEntitlementActiveForController, (LPVOID*)&LiveEntitlements_IsEntitlementActiveForController);
-		MH_CreateHook((LPVOID)REBASE(0x1DFC580), functions::hkLiveInventory_AreExtraSlotsPurchased, (LPVOID*)&LiveInventory_AreExtraSlotsPurchased);
-		MH_CreateHook((LPVOID)REBASE(0x1DFDFE0), functions::hkLiveInventory_IsValid, (LPVOID*)&LiveInventory_IsValid);
-		MH_CreateHook((LPVOID)REBASE(0x227BDA0), functions::hkInfo_ValueForKey, (LPVOID*)&Info_ValueForKey);
-		MH_CreateHook((LPVOID)REBASE(0x20C8F60), functions::hkMods_IsModsLoaded, (LPVOID*)&Mods_IsModsLoaded);
-		MH_CreateHook((LPVOID)REBASE(0x20C9AE0), functions::hkMods_IsModsLoaded_1, (LPVOID*)&Mods_IsModsLoaded_1);
+		MH_CreateHook((LPVOID)REBASE(0x1EEA560), (LPVOID)functions::hkLobbyMsgRW_PrepWriteMsg, (LPVOID*)&LobbyMsgRW_PrepWriteMsg);
+		MH_CreateHook((LPVOID)REBASE(0x1EEB8D0), (LPVOID)functions::hkLobbyMsgRW_PrepReadMsg, (LPVOID*)&LobbyMsgRW_PrepReadMsg);
+		MH_CreateHook((LPVOID)REBASE(0x20E31C0), (LPVOID)functions::hkCOD_GetBuildTitle, (LPVOID*)&COD_GetBuildTitle);
+		MH_CreateHook((LPVOID)REBASE(0x1E016C0), (LPVOID)functions::hkLive_SystemInfo, (LPVOID*)&Live_SystemInfo);
+		MH_CreateHook((LPVOID)REBASE(0x1EDFA60), (LPVOID)functions::hkLobbyTypes_GetMsgTypeName, (LPVOID*)&LobbyTypes_GetMsgTypeName);
+		MH_CreateHook((LPVOID)REBASE(0x2BC4EB0), (LPVOID)functions::hkqmemcpy, (LPVOID*)&qmemcpy);
+		MH_CreateHook((LPVOID)REBASE(0x22C9650), (LPVOID)functions::hkflsomeWeirdCharacterIndex, (LPVOID*)&flsomeWeirdCharacterIndex);
+		MH_CreateHook((LPVOID)REBASE(0x221CE90), (LPVOID)functions::hkSEH_ReplaceDirectiveInStringWithBinding, (LPVOID*)&SEH_ReplaceDirectiveInStringWithBinding);
+		MH_CreateHook((LPVOID)REBASE(0x1EEA3E0), (LPVOID)functions::hkLobbyMsgRW_PackageInt, (LPVOID*)&LobbyMsgRW_PackageInt);
+		MH_CreateHook((LPVOID)REBASE(0x1EEA490), (LPVOID)functions::hkLobbyMsgRW_PackageUInt, (LPVOID*)&LobbyMsgRW_PackageUInt);
+		MH_CreateHook((LPVOID)REBASE(0x1EEA450), (LPVOID)functions::hkLobbyMsgRW_PackageUChar, (LPVOID*)&LobbyMsgRW_PackageUChar);
+		MH_CreateHook((LPVOID)REBASE(0x1F27400), (LPVOID)functions::hkUI_DoModelStringReplacement, (LPVOID*)&UI_DoModelStringReplacement);
+		MH_CreateHook((LPVOID)REBASE(0x1EA9C80), (LPVOID)functions::hkLiveSteam_InitServer, (LPVOID*)&LiveSteam_InitServer);
+		MH_CreateHook((LPVOID)REBASE(0x195F100), (LPVOID)functions::hkCMD_MenuReponse_f, (LPVOID*)&CMD_MenuResponse_f);
+		MH_CreateHook((LPVOID)REBASE(0x195EFA0), (LPVOID)functions::hk_CMD_MenuResponseCached_f, (LPVOID*)&CMD_MenuResponseCached_f);
+		MH_CreateHook((LPVOID)REBASE(0x200CF00), (LPVOID)functions::hkUI_Model_GetModelFromPath_0, (LPVOID*)&UI_Model_GetModelFromPath_0);
+		MH_CreateHook((LPVOID)REBASE(0x200D5B0), (LPVOID)functions::hkUI_Model_GetModelFromPath, (LPVOID*)&UI_Model_GetModelFromPath);
+		MH_CreateHook((LPVOID)REBASE(0x200CFC0), (LPVOID)functions::hkUI_Model_CreateModelFromPath, (LPVOID*)&UI_Model_CreateModelFromPath);
+		MH_CreateHook((LPVOID)REBASE(0x200CD00), (LPVOID)functions::hkUI_Model_AllocateNode, (LPVOID*)&UI_Model_AllocateNode);
+		MH_CreateHook((LPVOID)REBASE(0x211F5A0), (LPVOID)functions::hkSys_VerifyPacketChecksum, (LPVOID*)&Sys_VerifyPacketChecksum);
+		MH_CreateHook((LPVOID)REBASE(0x211F500), (LPVOID)functions::hkSys_ChecksumCopy, (LPVOID*)&Sys_ChecksumCopy);
+		MH_CreateHook((LPVOID)REBASE(0x1EEA940), (LPVOID)functions::hkLobbyMsgRW_PrintMessage, (LPVOID*)&LobbyMsgRW_PrintMessage);
+		MH_CreateHook((LPVOID)REBASE(0x1EEA680), (LPVOID)functions::hkLobbyMsgRW_PrintDebugMessage, (LPVOID*)&LobbyMsgRW_PrintDebugMessage);
+		MH_CreateHook((LPVOID)REBASE(0x1EF8A60), (LPVOID)functions::hkExecLuaCMD, (LPVOID*)&ExecLuaCMD);
+		MH_CreateHook((LPVOID)REBASE(0x1EBB200), (LPVOID)functions::hkLive_UserGetName, (LPVOID*)&Live_UserGetName);
+		MH_CreateHook((LPVOID)&__report_gsfailure, (LPVOID)functions::__report_gsfailure_hook, (LPVOID*)&pOriginalGSFailure);
+		MH_CreateHook((LPVOID)REBASE(0x143A620), (LPVOID)functions::hkdwInstantDispatchMessage, (LPVOID*)&dwInstantDispatchMessage);
+		MH_CreateHook((LPVOID)REBASE(0x134CD70), (LPVOID)functions::hkCL_ConnectionlessCMD, (LPVOID*)&CL_ConnectionlessCMD);
+		MH_CreateHook((LPVOID)REBASE(0x1E85450), (LPVOID)functions::hkLivePresence_Serialize, (LPVOID*)&LivePresence_Serialize);
+		MH_CreateHook((LPVOID)REBASE(0x1321130), (LPVOID)functions::hkCL_GetConfigString, (LPVOID*)&CL_GetConfigString);
+		MH_CreateHook((LPVOID)REBASE(0x20CB0C0), (LPVOID)functions::hkMods_SubscribeUGC, (LPVOID*)&Mods_SubscribeUGC);
+		MH_CreateHook((LPVOID)REBASE(0x1E19B30), (LPVOID)functions::hkLiveInvites_AcceptInvite, (LPVOID*)&LiveInvites_AcceptInvite);
+		MH_CreateHook((LPVOID)REBASE(0x1E724A0), (LPVOID)functions::hkLiveInvites_SendJoinInfo, (LPVOID*)&LiveInvites_SendJoinInfo);
+		MH_CreateHook((LPVOID)REBASE(0x1E72040), (LPVOID)functions::hkLiveInvites_JoinMessageAction, (LPVOID*)&LiveInvites_JoinMessageAction);
+		MH_CreateHook((LPVOID)REBASE(0x1EA4E30), (LPVOID)functions::hkUI_BrowserOpen, (LPVOID*)&UI_BrowserOpen);
+		/*MH_CreateHook((LPVOID)REBASE(0xA7DE0), (LPVOID)functions::hkBG_Cache_GetScriptMenuNameForIndex, (LPVOID*)&BG_Cache_GetScriptMenuNameForIndex);
+		MH_CreateHook((LPVOID)REBASE(0xA78A0), (LPVOID)functions::hkBG_Cache_GetEventStringNameForIndex, (LPVOID*)&BG_Cache_GetEventStringNameForIndex);
+		MH_CreateHook((LPVOID)REBASE(0xA7AB0), (LPVOID)functions::hkBG_Cache_GetLocStringNameForIndex, (LPVOID*)&BG_Cache_GetLocStringNameForIndex);
+		MH_CreateHook((LPVOID)REBASE(0xA7A00), (LPVOID)functions::hkBG_Cache_GetLUIMenuForIndex, (LPVOID*)&BG_Cache_GetLUIMenuForIndex);
+		MH_CreateHook((LPVOID)REBASE(0xA7990), (LPVOID)functions::hkBG_Cache_GetLUIMenuDataForIndex, (LPVOID*)&BG_Cache_GetLUIMenuDataForIndex);*/
+		MH_CreateHook((LPVOID)REBASE(0x1EAAD60), (LPVOID)functions::hkUserHasLicenseForApp, (LPVOID*)&UserHasLicenseForApp);
+		MH_CreateHook((LPVOID)REBASE(0x1DFCC60), (LPVOID)functions::hkLiveInventory_GetItemQuantity, (LPVOID*)&LiveInventory_GetItemQuantity);
+		MH_CreateHook((LPVOID)REBASE(0x1E06110), (LPVOID)functions::hkLiveEntitlements_IsEntitlementActiveForController, (LPVOID*)&LiveEntitlements_IsEntitlementActiveForController);
+		MH_CreateHook((LPVOID)REBASE(0x1DFC580), (LPVOID)functions::hkLiveInventory_AreExtraSlotsPurchased, (LPVOID*)&LiveInventory_AreExtraSlotsPurchased);
+		MH_CreateHook((LPVOID)REBASE(0x1DFDFE0), (LPVOID)functions::hkLiveInventory_IsValid, (LPVOID*)&LiveInventory_IsValid);
+		MH_CreateHook((LPVOID)REBASE(0x227BDA0), (LPVOID)functions::hkInfo_ValueForKey, (LPVOID*)&Info_ValueForKey);
+		MH_CreateHook((LPVOID)REBASE(0x20C8F60), (LPVOID)functions::hkMods_IsModsLoaded, (LPVOID*)&Mods_IsModsLoaded);
+		MH_CreateHook((LPVOID)REBASE(0x20C9AE0), (LPVOID)functions::hkMods_IsModsLoaded_1, (LPVOID*)&Mods_IsModsLoaded_1);
 
 		MH_EnableHook(MH_ALL_HOOKS);
 	}

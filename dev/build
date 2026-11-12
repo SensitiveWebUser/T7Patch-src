@@ -416,12 +416,13 @@ build_dll() {
 
     mkdir -p "$shim"
 
-    # The source includes <Winternl.h> and <TlHelp32.h>. MSVC's SDK is case-insensitive;
-    # mingw ships them lowercase and Linux is case-sensitive. Symlinks rather than
-    # editing the includes, since the capitalised spelling is what upstream uses.
+    # The source includes <Windows.h> (GameBuild.h), <Winternl.h> and <TlHelp32.h>. MSVC's
+    # SDK is case-insensitive; mingw ships them lowercase and Linux is case-sensitive.
+    # Symlinks rather than editing the includes, since the capitalised spelling is what
+    # upstream uses.
     local sysroot=/usr/share/mingw-w64/include
     [ -d "$sysroot" ] || sysroot=/usr/x86_64-w64-mingw32/include
-    for p in Winternl.h:winternl.h TlHelp32.h:tlhelp32.h; do
+    for p in Windows.h:windows.h Winternl.h:winternl.h TlHelp32.h:tlhelp32.h; do
         [ -f "$sysroot/${p##*:}" ] || die "missing $sysroot/${p##*:}"
         ln -sf "$sysroot/${p##*:}" "$shim/${p%%:*}"
     done

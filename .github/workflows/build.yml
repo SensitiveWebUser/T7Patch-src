@@ -206,6 +206,7 @@ jobs:
           mkdir -p /tmp/shim /tmp/obj
           sysroot=/usr/share/mingw-w64/include
           [ -d "$sysroot" ] || sysroot=/usr/x86_64-w64-mingw32/include
+          ln -sf "$sysroot/windows.h" /tmp/shim/Windows.h
           ln -sf "$sysroot/winternl.h" /tmp/shim/Winternl.h
           ln -sf "$sysroot/tlhelp32.h" /tmp/shim/TlHelp32.h
           printf '#pragma once\nextern "C" void __report_gsfailure(void);\n' > /tmp/shim/msvc_compat.h

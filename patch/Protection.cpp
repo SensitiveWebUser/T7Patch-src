@@ -7,9 +7,9 @@ bool Protection::IsInjectorlessInstall = true;
 __int64 Protection::PrivatePassword[3] = { 0, 0 };
 char Protection::CustomName[16] = { 0 };
 std::unordered_map<BYTE, std::function<void(__int32* lobbyMsgTypePtr, __int64 lobbyMsg)>> Protection::handle_packet_callbacks;
-__int64 Protection::Old_lobbymsgprints = NULL;
-__int64 Protection::CachedRetnAddy = NULL;
-__int64 Protection::CachedXUID = NULL;
+__int64 Protection::Old_lobbymsgprints = 0;
+__int64 Protection::CachedRetnAddy = 0;
+__int64 Protection::CachedXUID = 0;
 tZwContinue Protection::ZwContinue = NULL;
 tI_stricmp Protection::I_stricmp = NULL;
 char* Protection::UILocalizeDefaultText = NULL;
@@ -216,7 +216,7 @@ IHOOK_HEADER(IsProcessorFeaturePresent, BOOL, (DWORD processorFeature))
     {
         // force a crash
         *(__int64*)0x17 = processorFeature;
-        *(__int64*)processorFeature = 0x17;
+        *(__int64*)(uintptr_t)processorFeature = 0x17;
     }
     return IHOOK_ORIGINAL(IsProcessorFeaturePresent, (processorFeature));
 }
@@ -956,17 +956,17 @@ void Protection::install()
     oReadP2PPacket = (decltype(&ReadP2PPacket))((*(__int64*)(STEAMAPI_NETWORKING + 0x10)));
     IHOOK_INSTALL(IsProcessorFeaturePresent, GetModuleHandleA(0));
 
-    SwapSteamAPIPointer(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_GETUSERNAME, GetUsernamePtr);
-    SwapSteamAPIPointer(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_VT_NAMEBYXUID, GetUsernameXUIDPtr);
+    SwapSteamAPIPointer(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_GETUSERNAME, (void*)GetUsernamePtr);
+    SwapSteamAPIPointer(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_VT_NAMEBYXUID, (void*)GetUsernameXUIDPtr);
 
-    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT, GetOwnsContent);
-    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT2, GetOwnsContent2);
-    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_IS_VAC_BANNED, IsVacBanned);
-    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_GET_DLC_DOWNLOAD_PROGRESS, GetDlcDownloadProgress);
+    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT, (void*)GetOwnsContent);
+    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT2, (void*)GetOwnsContent2);
+    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_IS_VAC_BANNED, (void*)IsVacBanned);
+    SwapSteamAPIPointer(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_GET_DLC_DOWNLOAD_PROGRESS, (void*)GetDlcDownloadProgress);
 
-    SwapSteamAPIPointer(STEAMAPI_MATCHMAKING, STEAMAPI_MATCHMAKING_GETLOBBYCHATENTRY, GetLobbyChatEntry);
-    SwapSteamAPIPointer(STEAMAPI_MATCHMAKING, STEAMAPI_MATCHMAKING_CREATELOBBY, CreateLobby);
-    SwapSteamAPIPointer(STEAMAPI_NETWORKING, STEAMAPI_NETWORKING_READP2PPACKET, ReadP2PPacket);
+    SwapSteamAPIPointer(STEAMAPI_MATCHMAKING, STEAMAPI_MATCHMAKING_GETLOBBYCHATENTRY, (void*)GetLobbyChatEntry);
+    SwapSteamAPIPointer(STEAMAPI_MATCHMAKING, STEAMAPI_MATCHMAKING_CREATELOBBY, (void*)CreateLobby);
+    SwapSteamAPIPointer(STEAMAPI_NETWORKING, STEAMAPI_NETWORKING_READP2PPACKET, (void*)ReadP2PPacket);
 
     *(__int64*)PTR_UpdatePreloadIdleFN = (INT64)CL_SwitchState_Idle_Update;
 
