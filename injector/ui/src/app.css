@@ -270,3 +270,13 @@
   .pane { gap: var(--sp-2); }
   .wiz-body:not([hidden]) { padding-bottom: var(--sp-2); }
 }
+
+/* StatusLog sets `margin-left:auto` on BOTH .log-count and .log-clear, which is right for a
+   standalone pane and wrong here: it floated the count into the middle of the bar and left Clear
+   against a dead gutter, so the summary did not read as one group on the left. */
+.logbar .log-count { margin-left: 0; }
+.logbar .log-clear { margin-left: var(--sp-3); }
+
+/* The badge column is the shrinker, not the tabs. With a third (Setup) tab present at 420px the
+   labels would otherwise wrap and grow the strip taller. */
+.tab { white-space: nowrap; }

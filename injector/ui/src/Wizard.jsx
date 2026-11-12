@@ -122,7 +122,7 @@ export default function Wizard({
             <Button
               variant={settingsDone ? 'default' : 'primary'}
               onClick={act(onSaveSettings)}
-              loading={busy === 'save'}
+              loading={busy === 'saveSettings'}
               disabled={!dir}
             >
               {t('wizard.saveSettings')}
@@ -158,13 +158,23 @@ export default function Wizard({
     {
       id: 'play',
       title: t('wizard.stepPlay'),
-      done: allDone,
+      // NOT allDone on Linux. The three probed booleans say the FILES are right; on Proton the
+      // hijack does nothing until WINEDLLOVERRIDES is in the Steam launch options, and nothing
+      // here can read that. Ticking green anyway would be the same unconditional claim the
+      // predecessor's DoneStep made, which is the one thing this wizard exists not to repeat.
+      done: allDone && !launchOption,
       body: (
         <>
           {/* onboard.doneBody is the predecessor's Wizard_DoneSummary, and it is the sentence that
               used to print unconditionally. It renders here only behind allDone, which is three
               probed booleans - the same three the ticks above are drawn from. */}
-          <p className="wiz-note">{allDone ? t('onboard.doneBody') : t('wizard.playBlocked')}</p>
+          <p className="wiz-note">
+            {!allDone
+              ? t('wizard.playBlocked')
+              : launchOption
+                ? t('wizard.playNeedsLaunchOption')
+                : t('onboard.doneBody')}
+          </p>
           {/* Linux only, and only once there is something to launch: on Proton the hijack does
               nothing until this string is in the launch options, so leaving it to the Advanced tab
               would make "all set" a lie on exactly one platform. */}

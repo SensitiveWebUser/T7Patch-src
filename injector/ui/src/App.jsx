@@ -283,11 +283,18 @@ export default function App() {
   // fires when a value actually changed - and "these defaults are fine" is a legitimate answer to
   // that step. Writes the same object the debounce would have written, then reprobes, which is
   // what flips conf_exists and ticks the step.
-  const saveSettings = run('save', async () => {
+  const saveSettings = run('saveSettings', async () => {
     if (!dir) return log(t('install.noFolder'))
     clearTimeout(saveTimer.current)
-    try { await ipc.saveConfig(dir, cfg); await refresh(dir) }
-    catch (e) { log(t('config.saveFailed', ipc.errorText(e))) }
+    try {
+      await ipc.saveConfig(dir, cfg)
+      await refresh(dir)
+      // Say so. The only other feedback is a tick changing colour, and "these defaults are fine"
+      // is a deliberate action that deserves an acknowledgement.
+      log(t('log.settingsSaved'))
+    } catch (e) {
+      log(t('config.saveFailed', ipc.errorText(e)))
+    }
   })
 
   const installed = state.dsound_installed && state.patch_installed

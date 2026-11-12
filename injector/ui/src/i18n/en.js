@@ -169,6 +169,9 @@ export default {
   'advanced.runSetupHint': 'Reopens the guided setup. It re-checks the folder, so it will not offer you anything that is already done.',
   'advanced.runSetupButton': 'Run setup',
 
+  'log.settingsSaved': 'Settings saved.',
+  'wizard.playNeedsLaunchOption': 'The files are in place. On Linux the patch still needs the Steam launch option below.',
+
   // STAGED, not dead: live injection has a working Rust backend and no UI yet
   // (PARITY-TODO.md). These are the predecessor's wording, kept so the feature does not have
   // to reinvent it. Delete them only if the feature is abandoned.
