@@ -17,11 +17,12 @@ export const GITHUB_LATEST_RELEASE_URL =
   'https://api.github.com/repos/Scroptss/T7Patch/releases/latest'
 
 /**
- * The version of the PATCH this build ships, which is not `tauri.conf.json`'s package version.
+ * The upstream patch version this build is based on (see core::CURRENT_VERSION for why it is not
+ * a fork number), which is not `tauri.conf.json`'s package version.
  * It is what an upstream tag is compared against. `core::CURRENT_VERSION` is the other copy of
  * this number; when the patch is bumped, both move.
  */
-export const CURRENT_VERSION = '3.05'
+export const CURRENT_VERSION = '3.09'
 
 /**
  * fetch() has no timeout of its own; its default is "until the OS gives up", which behind a

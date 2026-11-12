@@ -464,7 +464,45 @@ pub fn launch_game() -> std::io::Result<()> {
 /// nothing keeping them in step. The frontend does the comparison because the frontend does the
 /// fetch; this side keeps only the version string itself, below.
 
-pub const CURRENT_VERSION: &str = "3.05";
+/// The upstream patch version this build is based on, NOT a fork-specific number. The hardened
+/// DLL stays wire-compatible with upstream peers, so "is there a newer upstream release" is the
+/// right question for the update check, and upstream tags are what it is compared against. The
+/// DLL's own string adds a `-hardened.N` suffix (patch/framework.h) so bug reports can tell the
+/// two apart; version parsing stops at the `-`, so the suffix never affects the comparison.
+/// `version_tests` keeps this, ui/src/lib/updates.js and framework.h in step.
+pub const CURRENT_VERSION: &str = "3.09";
+
+#[cfg(test)]
+mod version_tests {
+    use super::CURRENT_VERSION;
+
+    fn repo_file(rel: &str) -> String {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel);
+        std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("reading {}: {e}", p.display()))
+    }
+
+    #[test]
+    fn the_ui_copy_matches() {
+        let js = repo_file("injector/ui/src/lib/updates.js");
+        let needle = format!("export const CURRENT_VERSION = '{CURRENT_VERSION}'");
+        assert!(js.contains(&needle), "updates.js must contain `{needle}`");
+    }
+
+    #[test]
+    fn the_dll_reports_the_same_base_version() {
+        let h = repo_file("patch/framework.h");
+        let line = h
+            .lines()
+            .find(|l| l.contains("#define ZBR_VERSION_FULL"))
+            .expect("framework.h defines ZBR_VERSION_FULL");
+        // "Patch 3.09" alone or "Patch 3.09-<suffix>": anything else (3.091, 3.10) is drift.
+        let at = line
+            .find(&format!("Patch {CURRENT_VERSION}"))
+            .unwrap_or_else(|| panic!("ZBR_VERSION_FULL is not based on {CURRENT_VERSION}: {line}"));
+        let next = line[at + "Patch ".len() + CURRENT_VERSION.len()..].chars().next();
+        assert!(matches!(next, Some(' ' | '-' | '"')), "ZBR_VERSION_FULL: {line}");
+    }
+}
 
 // ---------- elevation / shell open ----------
 #[cfg(windows)]
