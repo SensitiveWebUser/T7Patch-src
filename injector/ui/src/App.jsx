@@ -22,7 +22,7 @@ setClipboardWriter({ writeText: pluginWriteText })
 
 const NO_STATE = { dsound_installed: false, patch_installed: false, conf_exists: false, is_game_dir: false, foreign_dsound: false, game_build: null }
 const DEFAULT_CONFIG = {
-  playername: 'Unknown Soldier', networkpassword: '', isfriendsonly: true, autoinstallmods: false,
+  playername: 'Unknown Soldier', networkpassword: '', isfriendsonly: true, autoinstallmods: false, debuglog: false,
   toolautolaunchgame: false, toolcheckforupdatesonlaunch: true, toollastseenupstreamtag: '',
 }
 
@@ -494,8 +494,11 @@ export default function App() {
               </Setting>
             </div>
 
-            {/* The Debug log checkbox was removed with the fork-only DLL that read `debuglog`; the
-                current t7patch.dll has no such key, so the box would have done nothing. */}
+            {/* Removed once, while the DLL had no `debuglog` key and the box would have done
+                nothing; restored now that t7patch.dll reads it again for t7patch_trace.log. */}
+            <div className="checks">
+              <Checkbox label={t('advanced.debugLog')} hint={t('advanced.debugLogHint')} checked={cfg.debuglog} onValueChange={(v) => edit({ debuglog: v })} />
+            </div>
           </Tab>
         </Tabs>
 

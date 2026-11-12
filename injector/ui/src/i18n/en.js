@@ -65,6 +65,8 @@ export default {
   'advanced.checkOnLaunch': 'Check for updates on launch',
   'advanced.autoLaunch': 'Auto-launch on startup',
   'advanced.steamLaunchOptions': 'Steam launch options',
+  'advanced.debugLog': 'Debug log',
+  'advanced.debugLogHint': 'Makes t7patch.dll write t7patch_trace.log next to the game. Only worth turning on when you are reporting a problem - it slows the game down while it is on.',
   'advanced.steamLaunchOptionsHint': "Add this to the game's Steam launch options so Wine prefers the hijacked dsound.dll:",
 
   // --- What is actually on disk (install_state) ---------------------------------------------

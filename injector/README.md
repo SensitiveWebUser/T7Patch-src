@@ -96,9 +96,10 @@ the build before paying for a full webview link.
 reads), Steam library discovery (registry on Windows, `$HOME` probing plus VDF parsing on Linux),
 install/uninstall of the embedded DLLs, a PE export-directory walk with RVA resolution, a
 game-build check (`gamebuild.rs`, mirroring `patch/GameBuild.h` `bo3::detect_build()`), Steam
-launch, elevation, and the Windows inject-and-activate path. `patch/` is now upstream's tree
-(Patch 3.09). Its `t7patch.conf` parser adds `autoinstallmods` and drops the archived hardening's
-`debuglog`, so "the format `Protection.cpp` reads" means upstream's `patch_config::loadfrom()`.
+launch, elevation, and the Windows inject-and-activate path. `patch/` is upstream's tree
+(Patch 3.09) with the hardening re-ported on top, wire-compatible with upstream peers. Its
+`t7patch.conf` format is upstream's `patch_config::loadfrom()` (including `autoinstallmods`) plus
+the re-ported `debuglog` key, which upstream's parser ignores.
 The GitHub update check is *not*
 here any more: it moved to `ui/src/lib/updates.js` (see the size table above), and `lib.rs`
 keeps a tombstone saying so.

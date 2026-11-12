@@ -8,6 +8,10 @@
 //! The reader here mirrors `loadfrom` exactly, quirks included, so the UI shows what the game will
 //! actually use: keys are matched case-sensitively and untrimmed (FNV-1a of the raw text before
 //! '='), values are not trimmed, only a trailing CR is stripped, and there is no BOM handling.
+//!
+//! `debuglog` is the one exception. It is not an upstream key (upstream's DLL ignores it); this
+//! repo's DLL reads it through `zbr_parse_debuglog_line` in `patch/framework.h`, which trims the
+//! key and strips a first-line BOM. `parse_debuglog_line` mirrors that function instead.
 use std::io::Write;
 use std::path::Path;
 
@@ -31,9 +35,9 @@ pub struct PatchConfig {
     pub isfriendsonly: bool,
     /// Upstream's `autoinstallmods` (SetAutoInstallMods): auto-install workshop mods a lobby needs.
     pub autoinstallmods: bool,
-    // `debuglog` was removed here: it belonged to an earlier fork-only DLL (its trace log). The
-    // current DLL has no such key, so writing it would only advertise a switch that does nothing.
-    //
+    /// Turns on the DLL's t7patch_trace.log. Removed once while the DLL had no such key; restored
+    /// when patch/framework.h started reading it again.
+    pub debuglog: bool,
     // The tool's own preferences live in this same file rather than a settings file next to the
     // executable, matching the .NET build - the game directory is the one location both halves
     // already agree on. The `tool` prefix keeps them clear of the DLL's own keys; the DLL ignores
@@ -51,6 +55,7 @@ impl Default for PatchConfig {
             networkpassword: String::new(),
             isfriendsonly: true,
             autoinstallmods: false,
+            debuglog: false,
             toolautolaunchgame: false,
             toolcheckforupdatesonlaunch: true,
             toollastseenupstreamtag: String::new(),
@@ -74,6 +79,19 @@ fn istream_int(value: &str) -> Option<i32> {
     }
     let mag: i64 = digits[..n].parse().ok()?;
     i32::try_from(if neg { -mag } else { mag }).ok()
+}
+
+/// `zbr_parse_debuglog_line` (patch/framework.h), which both the DLL's early reader and its
+/// `loadfrom` use. None when the line is not a debuglog assignment; otherwise whether it enables
+/// the log. A UTF-8 BOM is stripped on the first line only, the key is trimmed of space/tab/CR/LF
+/// and matched case-sensitively, and the value is on only if `>> int` succeeds and is non-zero.
+fn parse_debuglog_line(line: &str, first_line: bool) -> Option<bool> {
+    let line = if first_line { line.strip_prefix('\u{feff}').unwrap_or(line) } else { line };
+    let (key, value) = line.split_once('=')?;
+    if key.trim_matches([' ', '\t', '\r', '\n']) != "debuglog" {
+        return None;
+    }
+    Some(istream_int(value).is_some_and(|v| v != 0))
 }
 
 /// Truncates on a UTF-8 character boundary at or below a BYTE cap, because the DLL's caps are
@@ -122,7 +140,11 @@ impl PatchConfig {
 
         // str::lines splits on '\n' and drops one trailing '\r', which is exactly getline plus
         // loadfrom's `if (line.back() == '\r') line.pop_back()`.
-        for line in text.lines() {
+        for (index, line) in text.lines().enumerate() {
+            // Before the exact-key match below, because this key alone is matched trimmed.
+            if let Some(on) = parse_debuglog_line(line, index == 0) {
+                c.debuglog = on;
+            }
             let Some((key, value)) = line.split_once('=') else { continue };
             match key {
                 "playername" => {
@@ -167,6 +189,8 @@ impl PatchConfig {
                 "networkpassword={}",
                 sanitize(&self.networkpassword, Some(MAX_NETWORK_PASSWORD_BYTES))
             )?;
+            // After upstream's four keys, where the DLL's own saveto puts it.
+            writeln!(f, "debuglog={}", u8::from(self.debuglog))?;
             writeln!(f, "toolautolaunchgame={}", u8::from(self.toolautolaunchgame))?;
             writeln!(
                 f,
@@ -210,14 +234,14 @@ mod tests {
         c.networkpassword = "pa=ss word".into();
         c.isfriendsonly = false;
         c.autoinstallmods = true;
+        c.debuglog = true;
         c.save(&dir).unwrap();
 
         let text = std::fs::read_to_string(dir.join("t7patch.conf")).unwrap();
-        // The DLL's four keys first, in saveto's order, and no fork-only debuglog.
+        // Upstream's four keys first, in saveto's order, then debuglog where saveto keeps it.
         assert!(text.starts_with(
-            "playername=Tester\nisfriendsonly=0\nautoinstallmods=1\nnetworkpassword=pa=ss word\n"
+            "playername=Tester\nisfriendsonly=0\nautoinstallmods=1\nnetworkpassword=pa=ss word\ndebuglog=1\n"
         ), "{text}");
-        assert!(!text.contains("debuglog"), "{text}");
 
         let back = PatchConfig::load(&dir);
         assert_eq!(back.playername, "Tester");
@@ -225,7 +249,29 @@ mod tests {
         assert_eq!(back.networkpassword, "pa=ss word");
         assert!(!back.isfriendsonly);
         assert!(back.autoinstallmods);
+        assert!(back.debuglog);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn debuglog_matches_the_dlls_reader() {
+        assert!(!PatchConfig::default().debuglog);
+        assert!(load_text("d1", b"debuglog=1\n").debuglog);
+        assert!(load_text("d2", b"debuglog=2\n").debuglog, "any non-zero int is on");
+        assert!(load_text("d3", b"debuglog= 1abc\r\n").debuglog, "leading space, trailing junk");
+        assert!(!load_text("d4", b"debuglog=0\n").debuglog);
+        assert!(!load_text("d5", b"debuglog=true\n").debuglog, "not an int: off");
+        assert!(!load_text("d6", b"debuglog=\n").debuglog);
+        assert!(!load_text("d7", b"debuglog=99999999999\n").debuglog, "failbit: off");
+        // Unlike upstream's keys, this one is trimmed and survives a BOM on the first line...
+        assert!(load_text("d8", b" debuglog\t=1\n").debuglog);
+        assert!(load_text("d9", "\u{feff}debuglog=1\n".as_bytes()).debuglog);
+        // ...but only the first line's BOM, and the match is still case-sensitive.
+        assert!(!load_text("d10", "playername=x\n\u{feff}debuglog=1\n".as_bytes()).debuglog);
+        assert!(!load_text("d11", b"DebugLog=1\n").debuglog);
+        // Last occurrence wins, including one that turns it back off.
+        assert!(!load_text("d12", b"debuglog=1\ndebuglog=0\n").debuglog);
+        assert!(load_text("d13", b"debuglog=0\ndebuglog=1\n").debuglog);
     }
 
     #[test]
