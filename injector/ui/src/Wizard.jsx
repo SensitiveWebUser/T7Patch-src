@@ -122,6 +122,11 @@ export default function Wizard({
             checked={cfg.isfriendsonly}
             onValueChange={(v) => onEdit({ isfriendsonly: v })}
           />
+          <Checkbox
+            label={t('basic.autoInstallMods')}
+            checked={cfg.autoinstallmods}
+            onValueChange={(v) => onEdit({ autoinstallmods: v })}
+          />
           <div className="wiz-act">
             <p className="wiz-note">{settingsDone ? t('wizard.settingsSaved') : t('wizard.settingsNew')}</p>
             {/* Typing already saves - App debounces at 750ms. This button is for the user who

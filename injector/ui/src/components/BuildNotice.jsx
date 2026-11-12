@@ -11,7 +11,8 @@ import { t } from '../i18n/index.js'
  *   - supported - a quiet one-liner, and only where the caller asks for it (`quiet`). Nothing
  *                 about a build the patch already knows deserves the user's attention.
  *   - not       - a warning with the three values, because the next thing the user should do is
- *                 report them, and retyping hex from a MessageBox is how 0x1D75BC00 got misread.
+ *                 report them, and copying beats retyping hex. (Retail exes keep 0x200
+ *                 alignment, so a SizeOfImage like 0x1D75BC00 is real, not a typo.)
  *
  * A warning and never a gate. The on-disk header equalling the one the DLL reads in memory is
  * unverified for this Arxan-packed exe, and the DLL makes the real decision anyway - so blocking

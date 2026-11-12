@@ -65,8 +65,7 @@ test('CopyButton without onCopy copies itself and reports the result', async () 
 
 // --- BuildNotice -----------------------------------------------------------------------------
 
-// Deliberately synthetic. The new build's real triple is unknown (the reported values are
-// OCR-damaged), and a plausible-looking guess here is what a later porter would grep for.
+// Deliberately synthetic, so it can never collide with a real build GameBuild.h later learns.
 const UNSUPPORTED = { time_date_stamp: 0x11111111, size_of_image: 0x22222000, entry_point: 0x00333333, supported: false }
 const SUPPORTED = { time_date_stamp: 0x693d731e, size_of_image: 0x1d74b000, entry_point: 0x02bd40fc, supported: true }
 
@@ -100,7 +99,7 @@ const ALL_DONE = {
   is_game_dir: true, conf_exists: true, dsound_installed: true, patch_installed: true,
   foreign_dsound: false, game_build: null,
 }
-const CFG = { playername: 'p', networkpassword: '', isfriendsonly: true }
+const CFG = { playername: 'p', networkpassword: '', isfriendsonly: true, autoinstallmods: false }
 const noop = async () => true
 
 function wizard(state, launchOption) {
@@ -162,4 +161,23 @@ test('Wizard notes a supported build quietly in the folder step and nowhere else
   const host = wizard({ ...ALL_DONE, game_build: SUPPORTED }, null)
   expect(host.querySelector('.build-warn')).toBeNull()
   expect(host.querySelector('#wiz-body-folder').textContent).toContain(t('build.supported'))
+})
+
+// --- autoinstallmods -------------------------------------------------------------------------
+
+test('Wizard settings step offers auto-install workshop mods, bound to autoinstallmods', async () => {
+  const edits = []
+  const host = mount(
+    <Wizard
+      dir="/game" state={{ ...ALL_DONE, conf_exists: false }} cfg={CFG} installed launchOption={null}
+      busy={null} onEdit={(patch) => { edits.push(patch) }} onBrowse={noop} onSaveSettings={noop}
+      onInstall={noop} onLaunch={noop} onCopyPassword={noop} onCopyBuildReport={noop} onDismiss={noop}
+    />,
+  )
+  const label = [...host.querySelectorAll('label')].find((l) => l.textContent === t('basic.autoInstallMods'))
+  expect(label).toBeTruthy()
+  const box = host.ownerDocument.getElementById(label.getAttribute('for'))
+  expect(box.checked).toBe(false)
+  await click(box)
+  expect(edits).toContainEqual({ autoinstallmods: true })
 })

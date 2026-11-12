@@ -22,7 +22,7 @@ setClipboardWriter({ writeText: pluginWriteText })
 
 const NO_STATE = { dsound_installed: false, patch_installed: false, conf_exists: false, is_game_dir: false, foreign_dsound: false, game_build: null }
 const DEFAULT_CONFIG = {
-  playername: 'Unknown Soldier', networkpassword: '', isfriendsonly: true, debuglog: false,
+  playername: 'Unknown Soldier', networkpassword: '', isfriendsonly: true, autoinstallmods: false,
   toolautolaunchgame: false, toolcheckforupdatesonlaunch: true, toollastseenupstreamtag: '',
 }
 
@@ -406,6 +406,12 @@ export default function App() {
               checked={cfg.isfriendsonly}
               onValueChange={(v) => edit({ isfriendsonly: v })}
             />
+            <Checkbox
+              label={t('basic.autoInstallMods')}
+              hint={t('basic.autoInstallModsHint')}
+              checked={cfg.autoinstallmods}
+              onValueChange={(v) => edit({ autoinstallmods: v })}
+            />
             {/* Moved off Advanced. It is a preference about the button directly below it, which is
                 the definition of a setting a normal user touches - Advanced is for the folder,
                 the launch option and the two destructive buttons. */}
@@ -488,9 +494,8 @@ export default function App() {
               </Setting>
             </div>
 
-            <div className="checks">
-              <Checkbox label={t('advanced.debugLog')} hint={t('advanced.debugLogHint')} checked={cfg.debuglog} onValueChange={(v) => edit({ debuglog: v })} />
-            </div>
+            {/* The Debug log checkbox was removed with the fork-only DLL that read `debuglog`; the
+                current t7patch.dll has no such key, so the box would have done nothing. */}
           </Tab>
         </Tabs>
 

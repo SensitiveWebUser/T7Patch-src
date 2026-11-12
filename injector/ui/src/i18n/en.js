@@ -46,6 +46,8 @@ export default {
   'basic.playerName': 'Player name',
   'basic.friendsOnly': 'Friends only',
   'basic.friendsOnlyHint': 'Only people on your friends list can join your lobby.',
+  'basic.autoInstallMods': 'Auto-install workshop mods',
+  'basic.autoInstallModsHint': 'When a lobby needs a Steam Workshop mod you do not have, T7Patch installs it for you.',
   'basic.password': 'Password',
   'basic.passwordHint': 'Recommended. Filters casual join attempts, not real attackers.',
 
@@ -58,8 +60,6 @@ export default {
   'advanced.uninstall': 'Uninstall',
   'advanced.uninstallButton': 'Uninstall T7Patch',
   'advanced.uninstallHint': 'Removes dsound.dll, t7patch.dll, and t7patch.conf from the game folder, including your saved player name, password, and preferences.',
-  'advanced.debugLog': 'Debug log',
-  'advanced.debugLogHint': "Makes t7patch.dll write its own log files next to the game. Only worth turning on when you are reporting a problem.",
   'advanced.updates': 'Updates',
   'advanced.updatesHint': "Checks upstream Scroptss/T7Patch's GitHub releases - never replaces this tool automatically, only offers to open the download page.",
   'advanced.checkOnLaunch': 'Check for updates on launch',
@@ -81,8 +81,8 @@ export default {
   // unverified for this Arxan-packed exe, so the wording says what the patch WILL do on a build
   // it does not know, and never forbids installing: the check is the DLL's, not this tool's.
   'build.unsupportedBadge': 'This game build is not supported yet.',
-  'build.unsupportedTitle': 'T7Patch does not support this game build yet; the patch will refuse to load.',
-  'build.unsupportedBody': 'Black Ops III has probably been updated. You can still install, but at startup the game will show a T7Patch message and then run without its protection until a T7Patch release supports this build. If you report it, include these values:',
+  'build.unsupportedTitle': 'T7Patch does not support this game build yet; the patch will not apply.',
+  'build.unsupportedBody': 'Black Ops III has probably been updated. You can still install, but the game will start without T7Patch\'s protection - and without any message saying so - until a T7Patch release supports this build. If you report it, include these values:',
   'build.supported': 'This game build is supported.',
 
   // --- Onboarding strip ---------------------------------------------------------------------
