@@ -142,6 +142,17 @@ jobs:
         with:
           name: t7patch.dll
           path: patch/x64/Release/t7patch.dll
+      # A separate artifact, not part of t7patch.dll's: the injector jobs download that one into
+      # injector/assets/, and nothing there should be embedded or shipped by accident. The PDB
+      # exists because the vcxproj sets GenerateDebugInformation for Release, and it is the only
+      # way to symbolise a crash dump from the MSVC build that actually ships. It has to come from
+      # THIS run - a PDB only matches the exact link that produced the DLL. A missing file is an
+      # error rather than a warning, so a vcxproj change that drops it cannot go unnoticed.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: t7patch.pdb
+          path: patch/x64/Release/t7patch.pdb
+          if-no-files-found: error
 
   # Test build only, never released - mingw is a different compiler/CRT than MSVC and this tree
   # depends on exactly what MSVC produces (AGENTS.md). Catches build breaks quickly without
@@ -159,6 +170,19 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+
+      # First, ahead of any compiling: an RVA that drifted from tools/baseline_*.json is wrong
+      # for the one build kSupportedBuilds names, and no compiler will notice. An earlier
+      # version of this step predated the script and guessed its flag, which turned this job and
+      # `release` red on every push; it now runs only the real read-only mode (exit 1 on drift).
+      # -B: the checkout is not ours to litter with __pycache__.
+      - name: Lint patch offsets
+        run: python3 -B tools/lint_offsets.py --check
+
+      # The lint's own tests, run separately so a broken checker fails here rather than passing
+      # every tree it is shown.
+      - name: Test the offset lint
+        run: python3 -B -I -m unittest discover -s tools -p 'test_*.py'
 
       - name: Install mingw-w64
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64
@@ -235,10 +259,9 @@ jobs:
 
   # dsound.dll has no MSVC project (see dsound_proxy.cpp's own remarks) - unlike t7patch.dll,
   # mingw IS its real build here, not a test-only stand-in, so this (mirroring dev/build's
-  # build_dsound_proxy()) is the one build that actually ships. Without this job the injector
-  # exes below would publish with EmbeddedAssets/dsound.dll missing (shipped tool falls back to
-  # "pick the files by hand" with nothing to pick), and no release would ever carry a working
-  # dsound.dll - a real gap this fixes, not just plumbing.
+  # build_dsound_proxy()) is the one build that actually ships. The injector jobs below embed
+  # its output with include_bytes!, so they cannot build at all without it, and it is also the
+  # only source of the dsound.dll in the manual-install zip.
   dsound-mingw:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -288,19 +311,19 @@ jobs:
           name: dsound.dll
           path: dsound.dll
 
-  # Both tool jobs stage the SAME payload the .NET jobs did: the MSVC-built t7patch.dll from
-  # dll-msvc, never the mingw one dev/build produces locally. AGENTS.md and CLAUDE.md are explicit
-  # that only MSVC builds ship, and this matters more here than it did for .NET: the Rust core
-  # embeds the pair with include_bytes!, so whatever is in assets/ at compile time is baked in
-  # irrevocably. A local `./dev/build --injector` stages a MINGW pair and is a test build only.
+  # Both tool jobs stage the MSVC-built t7patch.dll from dll-msvc, never the mingw one dev/build
+  # produces locally. AGENTS.md and CLAUDE.md are explicit that only MSVC builds ship, and the
+  # Rust core embeds the pair with include_bytes!, so whatever is in assets/ at compile time is
+  # baked in irrevocably. A local `./dev/build --injector` stages a MINGW pair and is a test
+  # build only.
   injector-linux:
     runs-on: ubuntu-latest
     needs: [ dll-msvc, dsound-mingw ]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
-      # webkit2gtk is a LINK-time dependency of this stack, unlike the .NET build where GTK was
-      # dlopen'd at runtime. Without these the build does not link at all.
+      # webkit2gtk is a LINK-time dependency of this stack, not something loaded at runtime.
+      # Without these the build does not link at all.
       - name: Install the WebKitGTK build dependencies
         run: |
           sudo apt-get update
@@ -330,9 +353,18 @@ jobs:
       # none of the apt packages above.
       - name: Run core unit tests
         run: cargo test --manifest-path injector/Cargo.toml -p t7patch-core
+      # Same reasoning as the core tests: they need only bun and the lockfile, so they fail
+      # before the webview link. Only this job runs them - they test JS logic, not anything that
+      # differs between the Linux and Windows builds.
+      - name: Install frontend dependencies
+        working-directory: injector/ui
+        run: bun install --frozen-lockfile
+      - name: Run UI unit tests
+        working-directory: injector/ui
+        run: bun test
       - name: Build the frontend
         working-directory: injector/ui
-        run: bun install --frozen-lockfile && bun run build
+        run: bun run build
       - name: Build linux-x64
         run: cargo build --release --manifest-path injector/Cargo.toml -p t7patch-ui
       - uses: actions/upload-artifact@v7
@@ -496,9 +528,18 @@ jobs:
              all, with no error message anywhere.
 
           3. Start the game and check t7patch-dsound.log, written next to these files.
-             One line says whether t7patch.dll loaded; a second says the patch was armed
-             once the game's main window appeared. Both present means it is working.
+             One line says whether t7patch.dll loaded; a second says the patch was asked
+             to start once the game's main window appeared. Those two lines only prove the
+             files are being picked up - they do NOT prove the patch is protecting you.
+             It can still refuse to run after that point.
              No file at all means step 2 (or the filename in step 1) is the problem.
+
+          4. If a "T7Patch" message box appears listing TimeDateStamp, SizeOfImage and
+             EntryPoint, your copy of Black Ops III is a game build this version of
+             T7Patch does not support (usually because the game was updated). The patch
+             has refused to load and you are NOT protected. Nothing you can change in
+             these steps fixes that; it needs a T7Patch release for that build. Please
+             report the three values from the box exactly as shown.
 
           Settings live in t7patch.conf in the same folder, created on first run.
           TXT
