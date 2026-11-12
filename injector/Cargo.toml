@@ -1,0 +1,20 @@
+# Cargo workspace for the installer tool.
+#
+#   core/       everything the installer DOES. No Tauri, WebKit or GTK dependency at all, so it
+#               builds and tests standalone - which is what keeps the UI honest: a frontend change
+#               cannot alter installer behaviour, because the frontend cannot reach into it.
+#   src-tauri/  the window and the command bindings, and nothing else.
+#   ui/         the React frontend (not a cargo member; built by bun, embedded at compile time).
+[workspace]
+resolver = "2"
+members = ["core", "src-tauri"]
+
+# Applied to every crate in the workspace, so the size figure in README.md is the one a real
+# shipper would get. These are most of why the binary lands near 10MB rather than near 20:
+# opt-level "z" and LTO are worth several MB on a Tauri app.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

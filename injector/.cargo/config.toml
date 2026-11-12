@@ -1,0 +1,16 @@
+# Statically link the MSVC C runtime for the Windows target.
+#
+# Without this, cargo-xwin produces an exe that dynamically imports VCRUNTIME140.dll and
+# VCRUNTIME140_1.dll - the Visual C++ 2015-2022 redistributable, which is NOT in-box on Windows.
+# On a machine without the redist it dies at load with "VCRUNTIME140.dll was not found", before
+# any of our code runs and before anything can report why. That is the same failure shape as the
+# missing-webkit2gtk one on Linux, and this tool's whole distribution promise is a single file a
+# game modder double-clicks.
+#
+# Verified against the built artifact: `grep -a VCRUNTIME140 dev/out/T7Patch-tauri-win-x64.exe`
+# matched before this file existed. The .NET build never had the problem - its publish is
+# self-contained.
+#
+# Cost is a slightly larger binary. Correct trade for a tool distributed as one loose exe.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

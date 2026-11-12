@@ -1,0 +1,27 @@
+# The Tauri shell: the window and the command bindings, nothing else. Every behaviour it exposes
+# comes from t7patch-core next door, so changing the frontend cannot change what the installer does.
+[package]
+name = "t7patch-ui"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "T7Patch"
+path = "src/main.rs"
+
+# Tauri picks the embedded frontend vs. `devUrl` from this feature and nothing else - see the
+# compile_error! guard in src/main.rs for the mechanism and what it cost. Default-on so a plain
+# `cargo build` is correct; `--no-default-features` is how you would run against a dev server.
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+t7patch-core = { path = "../core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-process = "2"
