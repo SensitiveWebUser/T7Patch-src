@@ -177,11 +177,13 @@ SD(addrbuff)
 EXPORT void SetFriendsOnly(bool isFriendsOnly)
 {
     Protection::IsFriendsOnly = isFriendsOnly;
+    ZLOG("cfg: friendsOnly=%d", (int)isFriendsOnly);
 }
 
 EXPORT void SetAutoInstallMods(bool isEnabled)
 {
     Protection::IsAutoInstallModsEnabled = isEnabled;
+    ZLOG("cfg: autoInstallMods=%d", (int)isEnabled);
 }
 
 EXPORT void SetPlayerName(const char* name)
@@ -208,6 +210,8 @@ EXPORT void SetNetworkPassword(const char* pass)
     {
         Protection::SetNetworkPassword(GSCUHashing::canon_hash64(pass));
     }
+    ZLOG("cfg: password %s, prefix=%02X,%02X", *pass ? "SET" : "cleared",
+        ZBR_PREFIX_BYTE, ZBR_PREFIX_BYTE2);
 }
 
 IHOOK_HEADER(IsProcessorFeaturePresent, BOOL, (DWORD processorFeature))
@@ -234,17 +238,20 @@ bool Protection::ReadP2PPacket(uintptr_t thisptr, void* pub_dest, unsigned int c
         if (game_im == 104) // info request
         {
             if (Protection::IsFriendsOnly && !Protection::IsFriendByXUIDUncached(*steam_id_remote)) {
+                ZLOG("p2p: DROP infoReq from non-friend xuid=%p", (void*)*steam_id_remote);
                 return false;
             }
         }
 
         if (game_im == 102) // join request
         {
+            ZLOG("p2p: DROP joinRequest (game_im=102) xuid=%p", (void*)*steam_id_remote);
             return false;
         }
 
         if (game_im == 101 || game_im == 109) // cbuf
         {
+            ZLOG("p2p: DROP cbuf (game_im=%d) xuid=%p", (int)game_im, (void*)*steam_id_remote);
             return false;
         }
     }
@@ -557,6 +564,11 @@ struct patch_config
     int isfriendsonly;
     int autoinstallmods;
     char* networkpassword;
+    // Not one of upstream's keys: upstream's DLL ignores it, this one turns the trace log on.
+    // has_debuglog records that the file carried the line at all, so saveto can keep it without
+    // adding it to a file that never had one.
+    bool debuglog;
+    bool has_debuglog;
     bool exists;
     std::filesystem::file_time_type modified;
 
@@ -566,6 +578,8 @@ struct patch_config
         memset(networkpassword, 0, 4);
         isfriendsonly = true;
         autoinstallmods = false;
+        debuglog = false;
+        has_debuglog = false;
         exists = false;
         modified = std::filesystem::file_time_type();
         __playername();
@@ -609,6 +623,12 @@ struct patch_config
         outfile << "isfriendsonly=" << isfriendsonly << std::endl;
         outfile << "autoinstallmods=" << autoinstallmods << std::endl;
         outfile << "networkpassword=" << networkpassword << std::endl;
+        // After upstream's four keys, and only if the file being replaced had it: a fresh default
+        // conf stays byte-identical to upstream's, and a debuglog=1 the user wrote is not lost.
+        if (has_debuglog)
+        {
+            outfile << "debuglog=" << (debuglog ? 1 : 0) << std::endl;
+        }
 
         outfile.close();
         update_watcher_time(path);
@@ -624,9 +644,24 @@ struct patch_config
             return;
         }
 
+        // Reset per read, unlike upstream's keys: debuglog absent means off, so deleting the line
+        // must turn the trace log off rather than leave the last value in place.
+        debuglog = false;
+        has_debuglog = false;
+        bool firstLine = true;
+
         std::string line;
         while (std::getline(infile, line))
         {
+            // Through the shared helper so this and the early reader agree byte for byte; the
+            // upstream keys below are still parsed exactly as upstream parses them.
+            bool lineDebuglog = false;
+            if (zbr_parse_debuglog_line(line, firstLine, lineDebuglog))
+            {
+                debuglog = lineDebuglog;
+                has_debuglog = true;
+            }
+            firstLine = false;
 
             if (!line.empty() && line.back() == '\r')
             {
@@ -729,6 +764,9 @@ patch_config user_config;
 
 void apply_settings()
 {
+    // First, so the lines the setters below write are kept when this read is what turned it on.
+    g_trace_enabled.store(user_config.debuglog, std::memory_order_relaxed);
+    ZLOG("cfg: applying t7patch.conf");
     SetPlayerName(user_config.playername);
     SetFriendsOnly(user_config.isfriendsonly);
     SetAutoInstallMods(user_config.autoinstallmods);
@@ -1094,6 +1132,11 @@ void Protection::install()
         load_settings_initial();
         CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
     }
+
+    ZLOG("session: %s | route=%s | name=\"%s\" | friendsOnly=%d | autoInstallMods=%d | prefix=%02X,%02X",
+        ZBR_VERSION_FULL, Protection::IsInjectorlessInstall ? "injectorless" : "injector",
+        Protection::CustomName, (int)Protection::IsFriendsOnly, (int)Protection::IsAutoInstallModsEnabled,
+        ZBR_PREFIX_BYTE, ZBR_PREFIX_BYTE2);
 }
 
 void Protection::uninstall()

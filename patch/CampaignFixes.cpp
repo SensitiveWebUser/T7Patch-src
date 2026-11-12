@@ -194,7 +194,7 @@ namespace campaign_fixes
     {
         // February and September 2026 builds share this RVA (it is before the
         // September code-section deletion handled by GameBuild::get_live_rva).
-        MH_CreateHook(reinterpret_cast<void*>(REBASE(0x12CC320)),
+        CREATE_HOOK(reinterpret_cast<void*>(REBASE(0x12CC320)),
             reinterpret_cast<void*>(Scr_GscObjLinkHook), reinterpret_cast<void**>(&Scr_GscObjLink));
     }
 }

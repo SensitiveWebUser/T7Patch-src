@@ -734,10 +734,10 @@ namespace lua_symbols
 
     void InstallHooks()
     {
-        MH_CreateHook(reinterpret_cast<void*>(REBASE(HksiLuaGetInfoRva)),
+        CREATE_HOOK(reinterpret_cast<void*>(REBASE(HksiLuaGetInfoRva)),
             reinterpret_cast<void*>(HksiLuaGetInfoHook),
             reinterpret_cast<void**>(&OriginalHksiLuaGetInfo));
-        MH_CreateHook(reinterpret_cast<void*>(REBASE(LuaStateManagerErrorRva)),
+        CREATE_HOOK(reinterpret_cast<void*>(REBASE(LuaStateManagerErrorRva)),
             reinterpret_cast<void*>(LuaStateManagerErrorHook),
             reinterpret_cast<void**>(&OriginalLuaStateManagerError));
     }

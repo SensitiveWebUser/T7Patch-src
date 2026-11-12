@@ -476,21 +476,56 @@ void UninstallHook()
     }
 }
 
+// Only called once the build check has already failed, to put the values it compared into the trace
+// log: under Proton exclusive-fullscreen nothing else the user can see says why the patch is off.
+static void LogUnsupportedBuildHeaders()
+{
+    const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    const auto* dosHeader = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    if (!base || dosHeader->e_magic != IMAGE_DOS_SIGNATURE || dosHeader->e_lfanew <= 0)
+    {
+        ZLOG("arxan: UNSUPPORTED BUILD - no readable PE header");
+        return;
+    }
+
+    const auto* ntHeaders = reinterpret_cast<const IMAGE_NT_HEADERS64*>(
+        base + static_cast<std::uintptr_t>(dosHeader->e_lfanew));
+    ZLOG("arxan: UNSUPPORTED BUILD - patches NOT applied. TimeDateStamp=%08X SizeOfImage=%08X EntryPoint=%08X",
+        (unsigned)ntHeaders->FileHeader.TimeDateStamp, (unsigned)ntHeaders->OptionalHeader.SizeOfImage,
+        (unsigned)ntHeaders->OptionalHeader.AddressOfEntryPoint);
+}
+
 void RunPatching()
 {
+    // Before anything that can fail or bail out below, so those diagnostics are written at all.
+    zbr_enable_trace_from_config();
+    ZLOG("patch: RunPatching %s", ZBR_VERSION_FULL);
+
 	// Set the process priority to above normal to help with performance
     SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
 
     std::string arxanMessage;
     if (!arxan_bypass::install(arxanMessage))
     {
+        ZLOG("arxan: install FAILED: %s", arxanMessage.c_str());
+        if (!bo3::supported_build())
+        {
+            LogUnsupportedBuildHeaders();
+        }
         arxanMessage = "T7 Patch: " + arxanMessage + "\n";
         OutputDebugStringA(arxanMessage.c_str());
         return;
     }
+    ZLOG("arxan: %s", arxanMessage.c_str());
 
 	// Initialize MinHook
-    MH_Initialize();
+    const MH_STATUS initStatus = MH_Initialize();
+    if (initStatus != MH_OK)
+    {
+        // Logged only; upstream carries on regardless and that is left as it was. Every hook
+        // below depends on this, so the "hook: FAILED" lines that follow are its consequence.
+        ZLOG("hook: MH_Initialize FAILED (MH_STATUS=%d)", (int)initStatus);
+    }
 
 	// Set a default player name if none is set
     if (!*Protection::CustomName) { snprintf(Protection::CustomName, 16, "Unknown Soldier"); }
@@ -528,6 +563,7 @@ EXPORT void zbr_run_gamemode_lui(const char* input)
 
 EXPORT void Unload()
 {
+    ZLOG("unload: begin");
     HANDLE hThreadSnap = INVALID_HANDLE_VALUE;
     THREADENTRY32 te32;
 
