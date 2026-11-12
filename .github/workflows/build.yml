@@ -1,0 +1,524 @@
+name: Build
+
+on:
+  push:
+    branches: [ main, injector-modernization ]
+    tags: [ "v*" ]
+  pull_request:
+
+# Default to read-only; only the release job below (which publishes a release, mints an
+# OIDC token, and attests artifacts) needs more, scoped locally there rather than inherited
+# by every push/PR build job.
+permissions:
+  contents: read
+
+jobs:
+  # The authoritative artifact - see AGENTS.md, "Building": this codebase depends on
+  # precisely what an MSVC build does, so this is the only DLL build that ever ships.
+  dll-msvc:
+    # Pinned, not 'windows-latest': patch/T7Patch.vcxproj hard-pins <PlatformToolset>v145</...>,
+    # which exists only on the VS2026 image. The floating label happens to resolve there today;
+    # if it moves again this build breaks with a toolset error. Change these together.
+    runs-on: windows-2025-vs2026
+    # Every job here is minutes of work, so a bound well under GitHub's 360-minute default turns
+    # a hung step into a fast, obvious failure instead of a six-hour billed job with no output.
+    # Not hypothetical: all three export-verification steps are hand-rolled parsers reading
+    # bytes from a build that could have written a partial file, and the PE reader below had
+    # exactly that failure mode (see its name-scan bound comment). Every job carries the same
+    # bound - none should ever come close to it.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: microsoft/setup-msbuild@v3
+      - name: Build t7patch.dll (Release|x64)
+        run: msbuild patch\T7Patch.vcxproj /p:Configuration=Release /p:Platform=x64
+
+      # No objdump on a stock windows-latest runner (that's the mingw jobs' tool), and no dumpbin
+      # without a Developer Command Prompt setup we don't otherwise need - so this reads the
+      # PE32+ export directory by hand from raw bytes, using only BCL types PowerShell always
+      # has loaded (no Add-Type/NuGet). Same six symbols and list-missing-then-::error:: shape
+      # as the other three build jobs' equivalent step, but this is the one that actually checks
+      # the DLL that ships (see the comment above this job).
+      - name: Verify exported symbols
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $required = @(
+            "EnableInjectorlessInstall", "zbr_run_gamemode_lui", "Unload",
+            "SetPlayerName", "SetNetworkPassword", "SetFriendsOnly"
+          )
+
+          function ReadU16([byte[]]$Bytes, [int]$Offset) { [BitConverter]::ToUInt16($Bytes, $Offset) }
+          function ReadU32([byte[]]$Bytes, [int]$Offset) { [BitConverter]::ToUInt32($Bytes, $Offset) }
+
+          # Maps an RVA to a file offset. Matched against SizeOfRawData only, never VirtualSize: a
+          # section whose VirtualSize exceeds its SizeOfRawData has a zero-filled virtual tail
+          # with no file bytes at all, so an RVA there has no real offset - accepting it would
+          # compute an offset landing in the next section's raw data (or past EOF) and read that
+          # as export data. A SizeOfRawData of 0 (an uninitialized-data section like mingw's
+          # .bss, PointerToRawData 0) is skipped outright for the same reason - otherwise every
+          # RVA in it maps to file offset 0, i.e. the DOS/PE headers.
+          function RvaToOffset([byte[]]$Bytes, [int]$SectionHeaderOffset, [int]$SectionCount, [uint32]$Rva) {
+            for ($i = 0; $i -lt $SectionCount; $i++) {
+              $s = $SectionHeaderOffset + ($i * 40)
+              $virtualAddress = ReadU32 $Bytes ($s + 12)
+              $rawSize = ReadU32 $Bytes ($s + 16)
+              $rawPtr = ReadU32 $Bytes ($s + 20)
+              if ($rawSize -eq 0) { continue }
+              if ($Rva -ge $virtualAddress -and $Rva -lt ($virtualAddress + $rawSize)) {
+                return $rawPtr + ($Rva - $virtualAddress)
+              }
+            }
+            throw "RVA 0x$($Rva.ToString('X')) has no file bytes in any section"
+          }
+
+          try {
+            $path = "patch/x64/Release/t7patch.dll"
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+
+            $peOffset = ReadU32 $bytes 0x3C
+            if ($bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45) {
+              throw "$path has no PE signature"
+            }
+
+            $coffOffset = $peOffset + 4
+            $sectionCount = ReadU16 $bytes ($coffOffset + 2)
+            $optHeaderSize = ReadU16 $bytes ($coffOffset + 16)
+            $optOffset = $coffOffset + 20
+
+            $magic = ReadU16 $bytes $optOffset
+            if ($magic -ne 0x20B) {
+              throw "expected a PE32+ (x64) optional header, got magic 0x$($magic.ToString('X'))"
+            }
+
+            # Data directories start at offset 112 into a PE32+ optional header; entry 0 is
+            # the export table (RVA, then Size - we only need the RVA).
+            $exportRva = ReadU32 $bytes ($optOffset + 112)
+            if ($exportRva -eq 0) {
+              throw "$path has no export directory"
+            }
+
+            $sectionHeaderOffset = $optOffset + $optHeaderSize
+            $exportDirOffset = RvaToOffset $bytes $sectionHeaderOffset $sectionCount $exportRva
+
+            # IMAGE_EXPORT_DIRECTORY: NumberOfNames at +24, AddressOfNames (RVA) at +32.
+            $nameCount = ReadU32 $bytes ($exportDirOffset + 24)
+            $namesRva = ReadU32 $bytes ($exportDirOffset + 32)
+            $namesOffset = RvaToOffset $bytes $sectionHeaderOffset $sectionCount $namesRva
+
+            $exports = @(
+              for ($i = 0; $i -lt $nameCount; $i++) {
+                $nameRva = ReadU32 $bytes ($namesOffset + ($i * 4))
+                $nameOffset = RvaToOffset $bytes $sectionHeaderOffset $sectionCount $nameRva
+                # The -lt $bytes.Length bound is load-bearing, not defensive noise: unlike
+                # BitConverter (which throws, so every other read here fails closed via the
+                # catch), indexing a byte[] out of range in PowerShell returns $null, and
+                # $null -ne 0 is $true - so an unterminated name string would spin this loop
+                # forever instead of erroring. $end is a uint32 that promotes to Double rather
+                # than wrapping, so it never even returns to 0; measured, that's ~7.6 hours of
+                # 100% CPU per name until GitHub's 6-hour job limit kills it with no output at
+                # all. Reproduced against a real DLL truncated just past its AddressOfNames
+                # array.
+                $end = $nameOffset
+                while ($end -lt $bytes.Length -and $bytes[$end] -ne 0) { $end++ }
+                if ($end -ge $bytes.Length) {
+                  throw "export name $i at file offset $nameOffset is not terminated inside $path"
+                }
+                [System.Text.Encoding]::ASCII.GetString($bytes, $nameOffset, $end - $nameOffset)
+              }
+            )
+
+            $missing = @($required | Where-Object { $exports -cnotcontains $_ })
+            if ($missing.Count -gt 0) {
+              Write-Host "::error::missing exports: $($missing -join ' ')"
+              exit 1
+            }
+            Write-Host "all six exports present"
+          } catch {
+            Write-Host "::error::failed to verify t7patch.dll exports: $_"
+            exit 1
+          }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: t7patch.dll
+          path: patch/x64/Release/t7patch.dll
+
+  # Test build only, never released - mingw is a different compiler/CRT than MSVC and this tree
+  # depends on exactly what MSVC produces (AGENTS.md). Catches build breaks quickly without
+  # needing a Windows runner for every push.
+  #
+  # This mirrors dev/build's container-side mingw-w64 compile by hand rather than invoking
+  # dev/build itself. dev/build IS tracked and present in a CI checkout (.gitignore tracks
+  # dev/build and dev/README.md; only dev/out/ is ignored), so
+  # that's not the reason - it's that dev/build only ever compiles inside its own
+  # container, and calling it here would mean running a container engine inside the runner to
+  # gain nothing this job doesn't already do natively. Cost of that choice: the flags below are
+  # a hand-kept copy - keep them in step with dev/build's build_dll() whenever either changes.
+  dll-mingw-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install mingw-w64
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64
+
+      # Pinned to a specific commit (not a mutable branch) - matches dev/build's Dockerfile
+      # pin; keep both in step. Currently d94c64d, 2026-06-13, "Fix link to MinHook article
+      # in README".
+      - name: Clone MinHook (mingw can't link the vendored MSVC-built .lib)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/minhook && cd /tmp/minhook
+          git init -q
+          git remote add origin https://github.com/TsudaKageyu/minhook.git
+          git fetch --depth 1 origin d94c64d32ea37bc4f5ee47d580709f70c6fb6080
+          git checkout -q FETCH_HEAD
+
+      - name: Case-correcting header shims + __report_gsfailure stub
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/shim /tmp/obj
+          sysroot=/usr/share/mingw-w64/include
+          [ -d "$sysroot" ] || sysroot=/usr/x86_64-w64-mingw32/include
+          ln -sf "$sysroot/winternl.h" /tmp/shim/Winternl.h
+          ln -sf "$sysroot/tlhelp32.h" /tmp/shim/TlHelp32.h
+          printf '#pragma once\nextern "C" void __report_gsfailure(void);\n' > /tmp/shim/msvc_compat.h
+          printf 'extern "C" void __report_gsfailure(void) {}\n' > /tmp/shim/msvc_compat.cpp
+
+      - name: Compile MinHook
+        run: |
+          set -euo pipefail
+          for c in /tmp/minhook/src/*.c /tmp/minhook/src/hde/*.c; do
+            x86_64-w64-mingw32-gcc -O2 -c "$c" -o "/tmp/obj/mh_$(basename "${c%.c}").o" -I/tmp/minhook/include
+          done
+
+      - name: Compile t7patch.dll (test build, mingw)
+        run: |
+          set -euo pipefail
+          cxxflags=(-std=c++20 -O2 -fms-extensions -Wno-invalid-offsetof -Wno-unused-value -Wno-attributes
+            -DWIN32 -D_WINDOWS -D_USRDLL -DT7PATCH_EXPORTS -DNDEBUG -D_CRT_SECURE_NO_WARNINGS
+            -DMINGW_HAS_SECURE_API=1 -D_WIN32_WINNT=0x0601
+            -include /tmp/shim/msvc_compat.h -I/tmp/shim -Ipatch -I/tmp/minhook/include)
+
+          x86_64-w64-mingw32-g++ "${cxxflags[@]}" -c /tmp/shim/msvc_compat.cpp -o /tmp/obj/msvc_compat.o
+          objs=(/tmp/obj/mh_*.o /tmp/obj/msvc_compat.o)
+          for s in patch/*.cpp; do
+            obj="/tmp/obj/$(basename "${s%.cpp}").o"
+            x86_64-w64-mingw32-g++ "${cxxflags[@]}" -c "$s" -o "$obj"
+            objs+=("$obj")
+          done
+
+          x86_64-w64-mingw32-g++ -shared -o /tmp/t7patch-test.dll "${objs[@]}" -static \
+            -lkernel32 -luser32 -ladvapi32 -lws2_32 -lshell32 -lole32 -lpsapi
+
+      - name: Verify exported symbols
+        run: |
+          set -euo pipefail
+          # The second sed anchors on objdump's "\t[   N] name" row shape, not a bare
+          # "everything up to ']'": the address range starts at its own "[Ordinal/Name Pointer]
+          # Table" header line, which the looser pattern turned into a bogus export named
+          # "Table" - harmless for grep -qx below, but inflated the printed count by one and put
+          # a nonexistent name in the failure dump.
+          exports="$(x86_64-w64-mingw32-objdump -p /tmp/t7patch-test.dll \
+            | sed -n '/\[Ordinal\/Name Pointer\] Table/,/^$/p' \
+            | sed -n 's/^[[:space:]]*\[[[:space:]]*[0-9]\{1,\}\][[:space:]]//p')"
+          missing=""
+          for sym in EnableInjectorlessInstall zbr_run_gamemode_lui Unload SetPlayerName SetNetworkPassword SetFriendsOnly; do
+            grep -qx "$sym" <<<"$exports" || missing="$missing $sym"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::missing exports:$missing"
+            exit 1
+          fi
+          echo "all six exports present"
+
+  # dsound.dll has no MSVC project (see dsound_proxy.cpp's own remarks) - unlike t7patch.dll,
+  # mingw IS its real build here, not a test-only stand-in, so this (mirroring dev/build's
+  # build_dsound_proxy()) is the one build that actually ships. Without this job the injector
+  # exes below would publish with EmbeddedAssets/dsound.dll missing (shipped tool falls back to
+  # "pick the files by hand" with nothing to pick), and no release would ever carry a working
+  # dsound.dll - a real gap this fixes, not just plumbing.
+  dsound-mingw:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install mingw-w64
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64
+      # -Wall -Wextra here but not in the t7patch.dll jobs, deliberately: that DLL is MSVC-first
+      # code where mingw is only a test build, so it carries a justified suppression list instead.
+      # This file is the opposite case - greenfield, mingw-only, no MSVC project, entirely
+      # hand-rolled fixed-buffer pointer arithmetic (WriteDecimal, BuildSiblingPath, AppendLogLine,
+      # RealProc), so this is the only compiler that will ever look at it. Not -Werror: a warning
+      # shouldn't block the one build of dsound.dll that ships. Keep in step with dev/build's
+      # build_dsound_proxy().
+      #
+      # -Wno-cast-function-type: every RealProc(...) trampoline casts GetProcAddress's generic
+      # FARPROC to the real DirectSound entry point's actual signature - the standard, unavoidable
+      # shape of dynamic-loading code, not a real type-safety gap. 13 warnings without this, one
+      # per trampoline.
+      - name: Compile dsound.dll (proxy)
+        run: |
+          set -euo pipefail
+          x86_64-w64-mingw32-g++ -std=c++20 -O2 -Wall -Wextra -Wno-cast-function-type -shared -DNDEBUG -D_WIN32_WINNT=0x0601 \
+            -o dsound.dll dsound-proxy/dsound_proxy.cpp -static -lkernel32 -luser32
+      - name: Verify exported symbols
+        run: |
+          set -euo pipefail
+          # Row-shape-anchored, not "everything up to ']'" - see the same step in
+          # dll-mingw-test for why the looser pattern invented a "Table" export.
+          exports="$(x86_64-w64-mingw32-objdump -p dsound.dll \
+            | sed -n '/\[Ordinal\/Name Pointer\] Table/,/^$/p' \
+            | sed -n 's/^[[:space:]]*\[[[:space:]]*[0-9]\{1,\}\][[:space:]]//p')"
+          missing=""
+          for sym in DirectSoundCreate DirectSoundCreate8 DirectSoundEnumerateA DirectSoundEnumerateW \
+                     DllCanUnloadNow DllGetClassObject DirectSoundCaptureCreate DirectSoundCaptureCreate8 \
+                     DirectSoundCaptureEnumerateA DirectSoundCaptureEnumerateW GetDeviceID \
+                     DirectSoundFullDuplexCreate; do
+            grep -qx "$sym" <<<"$exports" || missing="$missing $sym"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::dsound proxy is missing expected exports:$missing"
+            exit 1
+          fi
+          echo "all 12 DirectSound exports present"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dsound.dll
+          path: dsound.dll
+
+  # Both tool jobs stage the SAME payload the .NET jobs did: the MSVC-built t7patch.dll from
+  # dll-msvc, never the mingw one dev/build produces locally. AGENTS.md and CLAUDE.md are explicit
+  # that only MSVC builds ship, and this matters more here than it did for .NET: the Rust core
+  # embeds the pair with include_bytes!, so whatever is in assets/ at compile time is baked in
+  # irrevocably. A local `./dev/build --injector` stages a MINGW pair and is a test build only.
+  injector-linux:
+    runs-on: ubuntu-latest
+    needs: [ dll-msvc, dsound-mingw ]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      # webkit2gtk is a LINK-time dependency of this stack, unlike the .NET build where GTK was
+      # dlopen'd at runtime. Without these the build does not link at all.
+      - name: Install the WebKitGTK build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with: { toolchain: "1.90.0" }
+      - uses: oven-sh/setup-bun@v2
+        with: { bun-version: "1.4.2" }
+      - uses: actions/download-artifact@v8
+        with: { name: t7patch.dll, path: injector/assets }
+      - uses: actions/download-artifact@v8
+        with: { name: dsound.dll, path: injector/assets }
+      # include_bytes! fails the build outright on a missing file, but NOT on a zero-byte one - a
+      # truncated artifact would embed an empty dsound.dll and ship a dead hijack with no error
+      # anywhere. -s catches both.
+      - name: Verify both DLLs are staged for embedding
+        run: |
+          set -euo pipefail
+          for f in t7patch.dll dsound.dll; do
+            p="injector/assets/$f"
+            [ -s "$p" ] || { echo "::error::$p is missing or empty"; exit 1; }
+            echo "$p: $(wc -c < "$p") bytes"
+          done
+      # Before the build, so a broken config/PE/version-comparison test fails fast rather than
+      # after a full webview link. The core crate has no Tauri or GTK dependency, so this needs
+      # none of the apt packages above.
+      - name: Run core unit tests
+        run: cargo test --manifest-path injector/Cargo.toml -p t7patch-core
+      - name: Build the frontend
+        working-directory: injector/ui
+        run: bun install --frozen-lockfile && bun run build
+      - name: Build linux-x64
+        run: cargo build --release --manifest-path injector/Cargo.toml -p t7patch-ui
+      - uses: actions/upload-artifact@v7
+        with:
+          name: T7Patch-linux-x64
+          path: injector/target/release/T7Patch
+
+  injector-win:
+    # A real MSVC toolchain, NOT cargo-xwin. dev/build cross-compiles with xwin for local
+    # convenience; a release should not depend on a reimplementation of the linker environment
+    # when a real one is free here. Pinned to the same image as dll-msvc for the same reason.
+    runs-on: windows-2025-vs2026
+    needs: [ dll-msvc, dsound-mingw ]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with: { toolchain: "1.90.0" }
+      - uses: oven-sh/setup-bun@v2
+        with: { bun-version: "1.4.2" }
+      - uses: actions/download-artifact@v8
+        with: { name: t7patch.dll, path: injector/assets }
+      - uses: actions/download-artifact@v8
+        with: { name: dsound.dll, path: injector/assets }
+      - name: Verify both DLLs are staged for embedding
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in t7patch.dll dsound.dll; do
+            p="injector/assets/$f"
+            [ -s "$p" ] || { echo "::error::$p is missing or empty"; exit 1; }
+            echo "$p: $(wc -c < "$p") bytes"
+          done
+      - name: Build the frontend
+        working-directory: injector/ui
+        shell: bash
+        run: bun install --frozen-lockfile && bun run build
+      - name: Build win-x64
+        run: cargo build --release --manifest-path injector/Cargo.toml -p t7patch-ui
+      # injector/.cargo/config.toml sets crt-static for this target so the exe does not import
+      # VCRUNTIME140.dll. That is not cosmetic: the VC++ redistributable is not in-box on Windows,
+      # and without it the binary dies at load with a missing-DLL dialog before any of our code
+      # runs. Verified here rather than trusted: the failure is invisible on any developer machine
+      # (they all have the redist) and only ever reaches end users.
+      #
+      # This reads the IMPORT TABLE, not the file's bytes. A plain `grep VCRUNTIME140` over the
+      # exe is wrong and fails on a correctly-linked binary, because the exe embeds t7patch.dll
+      # verbatim (include_bytes!) and THAT DLL is built by MSVC with the default /MD, so its own
+      # import directory carries the string. Byte-level matching cannot tell the two apart.
+      # Matching is case-insensitive: the import name is whatever the linker emitted.
+      - name: Assert the exe does not need the VC++ redistributable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = 'injector/target/release/T7Patch.exe'
+          $b = [IO.File]::ReadAllBytes($exe)
+          $pe = [BitConverter]::ToInt32($b, 0x3c)
+          # PE32+ optional header: data directory 1 is the import table, at +120.
+          $magic = [BitConverter]::ToUInt16($b, $pe + 24)
+          if ($magic -ne 0x20b) { throw "expected PE32+ (0x20b), got 0x$('{0:x}' -f $magic)" }
+          $nsec = [BitConverter]::ToUInt16($b, $pe + 6)
+          $optSz = [BitConverter]::ToUInt16($b, $pe + 20)
+          $secs = $pe + 24 + $optSz
+          function RvaToOff($rva) {
+            for ($i = 0; $i -lt $nsec; $i++) {
+              $s = $secs + $i * 40
+              $va = [BitConverter]::ToUInt32($b, $s + 12)
+              $vs = [BitConverter]::ToUInt32($b, $s + 8)
+              $raw = [BitConverter]::ToUInt32($b, $s + 20)
+              if ($rva -ge $va -and $rva -lt ($va + [Math]::Max($vs, 1))) { return $raw + ($rva - $va) }
+            }
+            throw "RVA $rva is not inside any section"
+          }
+          $impRva = [BitConverter]::ToUInt32($b, $pe + 24 + 120)
+          if ($impRva -eq 0) { throw "no import directory - that cannot be right for this exe" }
+          $off = RvaToOff $impRva
+          $names = @()
+          while ($true) {
+            $nameRva = [BitConverter]::ToUInt32($b, $off + 12)
+            if ($nameRva -eq 0) { break }
+            $p = RvaToOff $nameRva
+            $e = $p; while ($b[$e] -ne 0) { $e++ }
+            $names += [Text.Encoding]::ASCII.GetString($b, $p, $e - $p)
+            $off += 20
+          }
+          Write-Host "imports: $($names -join ', ')"
+          $bad = $names | Where-Object { $_ -imatch '^(vcruntime140|msvcp140)' }
+          if ($bad) { throw "$exe imports $($bad -join ', ') - crt-static is not in effect" }
+          Write-Host "no VC++ redistributable import - statically linked CRT confirmed"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: T7Patch-win-x64
+          path: injector/target/release/T7Patch.exe
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [ dll-msvc, dll-mingw-test, dsound-mingw, injector-win, injector-linux ]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: false
+
+      # Three options:
+      #   - T7Patch-win-x64.exe / T7Patch-linux-x64 - the self-contained tool, one file, nothing
+      #     else needed (it has both DLLs baked in - see the dsound-mingw/injector-* jobs above).
+      #     Matches dev/build's own local output for a plain --injector run.
+      #     The Linux one needs webkit2gtk present on the user's machine - it is a LINK-time
+      #     dependency of this stack, so its absence is a failure to start, not a fallback.
+      #   - T7Patch-linux-files.zip - just the two DLLs for a manual dsound.dll-hijack install,
+      #     no exe at all (the only install method on Linux without running one - AGENTS.md #1).
+      #     Zipped, not a bare folder, because a GitHub Release asset has to be a single file.
+      #     dev/build's local equivalent is the loose dev/out/dsound.dll + dev/out/t7patch.dll
+      #     pair from a --dll (or default, --dll --injector) run - dev/build itself no longer
+      #     produces a like-named folder, that's purely this job's own release packaging.
+      - name: Lay out release assets
+        run: |
+          set -euo pipefail
+          mkdir -p release T7Patch-linux-files
+          cp artifacts/T7Patch-win-x64/T7Patch.exe release/T7Patch-win-x64.exe
+          cp artifacts/T7Patch-linux-x64/T7Patch release/T7Patch-linux-x64
+          chmod +x release/T7Patch-linux-x64
+          cp artifacts/t7patch.dll/t7patch.dll T7Patch-linux-files/
+          cp artifacts/dsound.dll/dsound.dll T7Patch-linux-files/
+
+          # This zip is the whole install for anyone who doesn't run the exe, and on Linux/Proton
+          # it's inert without the WINEDLLOVERRIDES launch option - Wine prefers its own builtin
+          # dsound over a native-looking one in the game folder, so the hijack never fires and
+          # there's no error to see. Shipping the two DLLs with no mention of that step is the
+          # difference between "works" and "silently does nothing", so the instructions travel
+          # inside the zip, not just in a release description nobody re-reads.
+          cat > T7Patch-linux-files/README.txt <<'TXT'
+          T7Patch - manual install (Linux/Proton, and Windows without the exe)
+
+          These two files install the patch by DLL search-order hijack: the game loads
+          dsound.dll from its own folder instead of the system one, and that proxy loads
+          t7patch.dll. No installer, no injector.
+
+          1. Copy BOTH files next to BlackOps3.exe, in the same folder as the game
+             executable itself:
+
+                 dsound.dll
+                 t7patch.dll
+
+             Keep the names exactly as they are, lowercase. On a case-sensitive
+             filesystem a T7Patch.dll sits BESIDE the correct name and nothing loads it -
+             the proxy asks for the literal string "t7patch.dll".
+
+          2. Linux/Proton only, and this step is mandatory: add this to the game's Steam
+             launch options, before %command% if you already have something there.
+
+                 WINEDLLOVERRIDES="dsound=n,b" %command%
+
+             Without it Wine uses its own built-in dsound and the patch never loads at
+             all, with no error message anywhere.
+
+          3. Start the game and check t7patch-dsound.log, written next to these files.
+             One line says whether t7patch.dll loaded; a second says the patch was armed
+             once the game's main window appeared. Both present means it is working.
+             No file at all means step 2 (or the filename in step 1) is the problem.
+
+          Settings live in t7patch.conf in the same folder, created on first run.
+          TXT
+
+          zip -r release/T7Patch-linux-files.zip T7Patch-linux-files
+          cd release && sha256sum * > SHA256SUMS
+
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: "release/*"
+
+      # Third-party action running in a job with contents:write/id-token:write - pinned to
+      # a commit SHA, not the mutable v2 tag, since this permission level is exactly what a
+      # supply-chain compromise of the action would abuse. Currently v2.6.2.
+      # TODO(node24): v2.6.2's action.yml is `using: node20`, and GitHub removes the node20
+      # runtime from hosted runners on 2026-09-23. Unlike the floating @vN tags elsewhere in this
+      # file, a SHA pin cannot self-heal - this step will simply stop running. Re-pin to the
+      # commit SHA of v3.0.3, which is verified node24
+      # (raw.githubusercontent.com/softprops/action-gh-release/v3.0.3/action.yml). Keep it a SHA
+      # for the reason above; only the SHA needs changing, not the pinning policy.
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: release/*
