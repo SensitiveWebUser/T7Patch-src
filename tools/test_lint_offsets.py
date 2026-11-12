@@ -8,73 +8,93 @@ import io
 import json
 import sys
 import tempfile
-import textwrap
 import unittest
-from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lint_offsets as lint  # noqa: E402
 
-ARXAN_H = """\
-#pragma once
-static uintptr_t crc_patch_1[] = {
-0x1000,
-0x2000,
-};
-static uintptr_t crc_patch_2[] = {
-0x3000,
-};
-static uintptr_t crc_patch_3[] = {
-0x4000,
-0x5000,
-0x6000,
-};
+# Shaped like upstream's patch/GameBuild.h: two builds, one shifted range, static_asserts.
+GAMEBUILD_H = """\
+namespace bo3
+{
+    enum class Build { Unknown, February2026, September2026 };
+    inline constexpr std::uint32_t February2026TimeDateStamp = 0x693D731E;
+    inline constexpr std::uint32_t February2026RetailImageSize = 0x1D74AC00;
+    inline constexpr std::uint32_t February2026DumpImageSize = 0x1D74B000;
+    inline constexpr std::uint32_t September2026TimeDateStamp = 0x6A7B6355;
+    inline constexpr std::uint32_t September2026RetailImageSize = 0x1D75BC00;
+    inline constexpr std::uint32_t September2026DumpImageSize = 0x1D75C000;
+    inline constexpr std::uintptr_t SeptemberShiftStartRva = 0x1000;
+    inline constexpr std::uintptr_t PrimaryCodeEndRva = 0x5000;
+    inline constexpr std::uintptr_t SeptemberCodeDelta = 0x10;
+    inline Build detect_build()
+    {
+        if (timestamp == September2026TimeDateStamp &&
+            (imageSize == September2026RetailImageSize || imageSize == September2026DumpImageSize))
+            return Build::September2026;
+        if (timestamp == February2026TimeDateStamp &&
+            (imageSize == February2026RetailImageSize || imageSize == February2026DumpImageSize))
+            return Build::February2026;
+        return Build::Unknown;
+    }
+    static_assert(get_live_rva(0x2000, Build::September2026) == 0x1FF0);
+    static_assert(get_live_rva(0x9000, Build::September2026) == 0x9000);
+    static_assert(get_live_rva(0x2000, Build::February2026) == 0x2000);
+}
 """
 
 ARXAN_CPP = """\
-static const SupportedBuild kSupportedBuilds[] =
+namespace
 {
-\t{ 0x693D731E, 0x1D74B000, 0x02BD40FC }, // retail
-};
-static const DWORD kHighestPatchedRva = 0x6000;
-static bool VerifyGameBuild()
-{
-\tif (sizeOfImage <= kHighestPatchedRva + 16) return false;
+    constexpr std::uint8_t kPatchKey = 0x69;
+    constexpr std::uintptr_t kReadySignalRva = 0x9948;
+    constexpr std::size_t kCrc1ExpectedCount = 3;
+    constexpr std::size_t kCrc2ExpectedCount = 2;
+    constexpr std::array<std::uint8_t, 2> kEncryptedPatch1 = { 0x21, 0x58 };
+    constexpr std::array<std::uint8_t, 3> kEncryptedPatch2 = { 0x21, 0x58, 0xA0 };
+    constexpr std::array<std::uint8_t, 2> kChecksumPattern1 = { 0x8B, 0x0C };
+    constexpr std::array<std::uint8_t, 3> kChecksumPattern2 = { 0x8B, 0x0C, 0x8B };
+    const auto* signal = reinterpret_cast<const std::uintptr_t*>(bo3::image_base() + kReadySignalRva);
 }
-static constexpr ObfuscatedPatch patch_crc_1({ 0x48, 0x31, 0xC9, 0x90, 0x90, 0x90 });
-static constexpr ObfuscatedPatch patch_crc_2({ 0x48, 0x31, 0xC9, 0x90, 0x90, 0x90, 0x90, 0x90 });
-static constexpr ObfuscatedPatch patch_crc_3({ 0x48, 0x31, 0xC0, 0x48, 0x31, 0xD2 });
-bool PatchChecksumComparisons_Precomputed()
+bool install(std::string& message)
 {
-\tfor (auto rva : crc_patch_1)
-\t\tpatch_crc_1.Apply((uint8_t*)(REBASE(rva)), PatchAddress);
-\tfor (auto rva : crc_patch_2)
-\t\tpatch_crc_2.Apply((uint8_t*)(REBASE(rva)), PatchAddress);
-\tfor (auto rva : crc_patch_3)
-\t\tpatch_crc_3.Apply((uint8_t*)(REBASE(rva)), PatchAddress);
+    if (!collect_pattern_patches(kChecksumPattern1, kEncryptedPatch1, kCrc1ExpectedCount, message) ||
+        !collect_pattern_patches(kChecksumPattern2, kEncryptedPatch2, kCrc2ExpectedCount, message))
+        return false;
 }
 """
 
 OFFSETS_H = """\
-#define OFFSET(x) ((INT64)GetModuleHandleA(NULL) + (INT64)x)
+#define OFFSET(x) ((INT64)bo3::address(static_cast<std::uintptr_t>(x)))
 #define REBASE(x) OFFSET(x)
-#define PTR_Foo REBASE(0x100)
+#define PTR_Foo REBASE(0x1100)
 #define PTR_Bar REBASE(0x200)
-#define Tokenize REBASE(0x20E2A3E + 0x3)
-#define Sys_Checksum(msg, size) ((unsigned __int16(__fastcall*)(const unsigned char*, __int32))REBASE(0x211F430))(msg, size)
-const static auto Foo = reinterpret_cast<bool(__fastcall*)(int)>OFFSET(0x100);
+#define Tokenize REBASE(0x20E2 + 0x3)
+const static auto Foo = reinterpret_cast<bool(__fastcall*)(int)>OFFSET(0x1100);
 const static auto Bar = reinterpret_cast<bool(__fastcall*)(int)>PTR_Bar;
 """
 
 HOOKS_CPP = """\
 void Install()
 {
-\tCREATE_HOOK((LPVOID)REBASE(0x100), functions::hkFoo, (LPVOID*)&Foo);
+\tMH_CreateHook((LPVOID)REBASE(0x1100), functions::hkFoo, (LPVOID*)&Foo);
 \tCREATE_HOOK((LPVOID)REBASE(0x200), functions::hkBar, (LPVOID*)&Bar);
-\t/*CREATE_HOOK((LPVOID)REBASE(0x999), functions::hkOld, (LPVOID*)&Foo);*/
+\t/*MH_CreateHook((LPVOID)REBASE(0x999), functions::hkOld, (LPVOID*)&Foo);*/
 \tint x = *(int*)REBASE(0x300); // REBASE(0x998)
 \tconst char* s = "// not a comment REBASE(0x997)";
+}
+"""
+
+LUA_CPP = """\
+namespace
+{
+    constexpr std::uintptr_t HksGetInfoRva = 0x1D00;
+}
+void InstallLua()
+{
+    MH_CreateHook(reinterpret_cast<void*>(REBASE(HksGetInfoRva)),
+        reinterpret_cast<void*>(&hk), reinterpret_cast<void**>(&orig));
 }
 """
 
@@ -86,12 +106,13 @@ class Tree:
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         files = {
-            "Arxan.h": ARXAN_H,
+            "GameBuild.h": GAMEBUILD_H,
             "Arxan.cpp": ARXAN_CPP,
             "offsets.h": OFFSETS_H,
             "Hooks.cpp": HOOKS_CPP,
-            "minhook/hook.c": "",
+            "LuaSymbols.cpp": LUA_CPP,
             "minhook/src/x.h": "#define X REBASE(0xDEAD)\n",
+            "detours/detours.h": "#define Y REBASE(0xBEEF)\n",
         }
         files.update(overrides)
         for rel, body in files.items():
@@ -106,13 +127,6 @@ class Tree:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = lint.main(["--root", str(self.root), "--baseline", str(self.baseline), *args])
-        return code, out.getvalue(), err.getvalue()
-
-    def run_default(self, *args):
-        """Like run(), but without --baseline, so the tool picks the path itself."""
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = lint.main(["--root", str(self.root), *args])
         return code, out.getvalue(), err.getvalue()
 
     def edit(self, rel, old, new):
@@ -131,241 +145,259 @@ class LintTestCase(unittest.TestCase):
         self.addCleanup(t.close)
         return t
 
+    def problems(self, t):
+        return lint.run_checks(lint.scan(t.root))
+
+    def assertProblem(self, t, fragment):
+        problems = self.problems(t)
+        self.assertTrue(any(fragment in p for p in problems), f"{fragment!r} not in {problems}")
+
 
 class TestHelpers(unittest.TestCase):
     def test_eval_literal(self):
-        self.assertEqual(lint.eval_literal("0x20E2A3E + 0x3"), 0x20E2A41)
-        self.assertEqual(lint.eval_literal(" 0x10 - 2 "), 14)
+        self.assertEqual(lint.eval_literal("0x10"), 16)
+        self.assertEqual(lint.eval_literal(" 0x1EEACF2 + 1 "), 0x1EEACF3)
+        self.assertEqual(lint.eval_literal("0x10 - 0x1"), 15)
         self.assertEqual(lint.eval_literal("010"), 8)
-        self.assertEqual(lint.eval_literal("0"), 0)
         self.assertIsNone(lint.eval_literal("rva"))
-        self.assertIsNone(lint.eval_literal("0x10 * 2"))
+        self.assertIsNone(lint.eval_literal("HksGetInfoRva"))
 
     def test_strip_comments_keeps_lines_and_blanks_strings(self):
-        # The "//" inside the string must not swallow the rest of the line ("c" survives).
-        src = 'a // x\n/* y\nz */ b "//q\\"" c \'/\'\n'
+        src = 'a // REBASE(1)\n/* REBASE(2)\n */ b "REBASE(3) // x" c\n'
         out = lint.strip_comments(src)
-        self.assertEqual(len(out), len(src))
         self.assertEqual(out.count("\n"), src.count("\n"))
-        for gone in ("x", "y", "z", "q"):
-            self.assertNotIn(gone, out)
-        self.assertIn(" b ", out)
-        self.assertIn(" c ", out)
+        self.assertNotIn("REBASE", out)
+        self.assertIn("b", out)
+        self.assertIn("c", out)
+
+    def test_shift_model_matches_get_live_rva(self):
+        s = lint.Shift("September", 0x1000, 0x5000, 0x10)
+        self.assertEqual(s.live_rva(0x1000, "September2026"), 0xFF0)
+        self.assertEqual(s.live_rva(0x4FFF, "September2026"), 0x4FEF)
+        self.assertEqual(s.live_rva(0x5000, "September2026"), 0x5000)  # end is exclusive
+        self.assertEqual(s.live_rva(0xFFF, "September2026"), 0xFFF)
+        self.assertEqual(s.live_rva(0x2000, "February2026"), 0x2000)
 
 
 class TestInventory(LintTestCase):
-    def test_sites_tables_and_builds(self):
+    def test_sites_builds_shift_and_arxan(self):
         inv = lint.scan(self.tree().root)
-        self.assertEqual(inv.parse_errors, [])
         values = sorted(s.value for s in inv.sites)
-        # Comments, the string literal, minhook and the non-literal REBASE(rva) are all excluded.
-        self.assertEqual(values, sorted([0x100, 0x200, 0x20E2A41, 0x211F430, 0x100, 0x100, 0x200, 0x300]))
-        self.assertEqual({k: len(t.rvas) for k, t in inv.tables.items()},
-                         {"crc_patch_1": 2, "crc_patch_2": 1, "crc_patch_3": 3})
-        self.assertEqual({k: t.patch_len for k, t in inv.tables.items()},
-                         {"crc_patch_1": 6, "crc_patch_2": 8, "crc_patch_3": 6})
-        self.assertEqual(inv.supported_builds, [(0x693D731E, 0x1D74B000, 0x02BD40FC)])
-        self.assertEqual(inv.highest_patched_rva, 0x6000)
-        self.assertEqual(inv.gate_margin, 16)
+        # Comments, strings and vendored minhook/detours are excluded; HksGetInfoRva is resolved.
+        self.assertEqual(values, [0x200, 0x200, 0x300, 0x1100, 0x1100, 0x1100, 0x1D00, 0x20E5])
+        self.assertEqual(sorted(inv.builds), ["February2026", "September2026"])
+        self.assertEqual(inv.builds["September2026"].retail_size, 0x1D75BC00)
+        self.assertEqual((inv.shift.start, inv.shift.end, inv.shift.delta), (0x1000, 0x5000, 0x10))
+        self.assertEqual(len(inv.shift_asserts), 3)
+        self.assertEqual([c.pattern for c in inv.arxan_calls], ["kChecksumPattern1", "kChecksumPattern2"])
+        self.assertEqual(inv.arxan_counts, {"kCrc1ExpectedCount": 3, "kCrc2ExpectedCount": 2})
+        self.assertEqual(lint.decrypted(inv, "kEncryptedPatch2"), [0x48, 0x31, 0xC9])
+        self.assertEqual([(u.expr, u.value) for u in inv.raw_uses], [("kReadySignalRva", 0x9948)])
+        self.assertEqual(inv.unresolved, [])
 
-    def test_line_numbers_and_names(self):
+    def test_classification(self):
         inv = lint.scan(self.tree().root)
-        hook = [s for s in inv.sites if s.file == "patch/Hooks.cpp" and s.value == 0x200]
-        self.assertEqual([(s.line, s.name) for s in hook], [(4, "Bar")])
-        tok = [s for s in inv.sites if s.value == 0x20E2A41]
-        self.assertEqual((tok[0].line, tok[0].name), (5, "Tokenize"))
+        self.assertEqual(lint.classify(inv, 0x1100), "shifted")
+        self.assertEqual(lint.classify(inv, 0x200), "unshifted")
+        base = lint.build_baseline(inv)
+        self.assertEqual(
+            base["classification"],
+            {"sites_shifted": 5, "sites_unshifted": 3, "distinct_rvas_shifted": 3, "distinct_rvas_unshifted": 2},
+        )
+
+    def test_names_label_sites(self):
+        inv = lint.scan(self.tree().root)
+        names = {s.name for s in inv.sites if s.name}
+        # The hook's original pointer wins over the *Rva constant for a REBASE(HksGetInfoRva) site.
+        self.assertTrue({"PTR_Foo", "Foo", "Bar", "orig"} <= names, names)
 
     def test_alias_pointer_resolves(self):
         inv = lint.scan(self.tree().root)
-        kinds = {(b.name, b.kind) for b in inv.bindings if b.name == "Bar"}
-        self.assertIn(("Bar", "pointer (via PTR_Bar)"), kinds)
+        bar = [b for b in inv.bindings if b.name == "Bar" and b.kind.startswith("pointer")]
+        self.assertEqual([b.value for b in bar], [0x200])
+
+    def test_non_constant_argument_is_reported_not_counted(self):
+        t = self.tree(**{"Extra.cpp": "void f(uintptr_t rva) { auto p = REBASE(rva); }\n"})
+        inv = lint.scan(t.root)
+        self.assertEqual([(f, e) for f, _, e in inv.unresolved], [("patch/Extra.cpp", "rva")])
 
     def test_clean_tree_passes(self):
         t = self.tree()
+        self.assertEqual(self.problems(t), [])
         code, out, _ = t.run()
         self.assertEqual(code, 0, out)
-        self.assertIn("crc_patch_3: 3 sites", out)
-        self.assertIn("TimeDateStamp 0x693D731E", out)
+        self.assertIn("total expected sites: 5", out)
 
 
 class TestChecks(LintTestCase):
-    def failures(self, tree):
-        return lint.run_checks(lint.scan(tree.root))
-
-    def test_stale_highest_rva(self):
-        t = self.tree()
-        t.edit("Arxan.h", "0x6000,", "0x7000,")
-        self.assertTrue(any("kHighestPatchedRva is 0x6000" in f and "0x7000" in f for f in self.failures(t)))
-
-    def test_highest_rva_not_the_true_max(self):
-        t = self.tree()
-        t.edit("Arxan.cpp", "kHighestPatchedRva = 0x6000", "kHighestPatchedRva = 0x5000")
-        self.assertTrue(any("kHighestPatchedRva is 0x5000" in f for f in self.failures(t)))
-
-    def test_margin_smaller_than_patch(self):
-        t = self.tree()
-        t.edit("Arxan.cpp", "kHighestPatchedRva + 16", "kHighestPatchedRva + 4")
-        self.assertTrue(any("gate margin" in f for f in self.failures(t)))
-
-    def test_duplicate_in_table(self):
-        t = self.tree()
-        t.edit("Arxan.h", "0x2000,", "0x2000,\n0x1000,")
-        self.assertTrue(any("crc_patch_1: RVA 0x1000 appears 2 times" in f for f in self.failures(t)))
-
-    def test_overlap_across_tables(self):
-        t = self.tree()
-        t.edit("Arxan.h", "0x3000,", "0x1004,")
-        self.assertTrue(any("overlapping" in f for f in self.failures(t)))
-
     def test_disagreeing_hook_target(self):
         t = self.tree()
-        t.edit("Hooks.cpp", "REBASE(0x100), functions::hkFoo", "REBASE(0x104), functions::hkFoo")
-        found = [f for f in self.failures(t) if "symbol 'Foo'" in f]
-        self.assertEqual(len(found), 1)
-        self.assertIn("0x104", found[0])
-        self.assertIn("patch/Hooks.cpp:3", found[0])
+        t.edit("Hooks.cpp", "REBASE(0x1100), functions::hkFoo", "REBASE(0x1104), functions::hkFoo")
+        self.assertProblem(t, "symbol 'Foo' has disagreeing RVAs")
 
     def test_disagreeing_ptr_and_pointer(self):
         t = self.tree()
-        t.edit("offsets.h", "#define PTR_Foo REBASE(0x100)", "#define PTR_Foo REBASE(0x108)")
-        self.assertTrue(any("symbol 'Foo'" in f for f in self.failures(t)))
+        t.edit("offsets.h", "#define PTR_Foo REBASE(0x1100)", "#define PTR_Foo REBASE(0x1108)")
+        self.assertProblem(t, "symbol 'Foo' has disagreeing RVAs")
 
-    def test_alias_follows_its_target(self):
-        # Bar is "reinterpret_cast<...>PTR_Bar", so porting PTR_Bar alone must still flag the hook.
+    def test_duplicate_rva_constant(self):
+        t = self.tree(**{"Other.cpp": "constexpr std::uintptr_t HksGetInfoRva = 0x1D00;\n"})
+        self.assertProblem(t, "rva-constant 'HksGetInfoRva' is defined 2 times")
+
+    def test_raw_use_in_shift_range(self):
         t = self.tree()
-        t.edit("offsets.h", "#define PTR_Bar REBASE(0x200)", "#define PTR_Bar REBASE(0x208)")
-        found = [f for f in self.failures(t) if "symbol 'Bar'" in f]
-        self.assertEqual(len(found), 1)
-        self.assertIn("hook-target", found[0])
+        t.edit("Arxan.cpp", "kReadySignalRva = 0x9948", "kReadySignalRva = 0x2948")
+        self.assertProblem(t, "bypasses bo3::address()")
 
-    def test_same_literal_two_names_is_fine(self):
-        t = self.tree(**{"offsets.h": OFFSETS_H + "#define Alias1 REBASE(0x500)\n#define Alias2 REBASE(0x500)\n"})
-        self.assertEqual(self.failures(t), [])
+    def test_raw_use_outside_shift_range_is_fine(self):
+        self.assertEqual(self.problems(self.tree()), [])
 
-    def test_missing_arxan_pieces_are_errors(self):
-        t = self.tree(**{"Arxan.cpp": "// nothing here\n"})
-        fails = self.failures(t)
-        for needle in ("kSupportedBuilds", "kHighestPatchedRva", "gate margin", "Apply' loop"):
-            self.assertTrue(any(needle in f for f in fails), needle)
+    def test_dump_size_must_be_retail_rounded_to_a_page(self):
+        t = self.tree()
+        t.edit("GameBuild.h", "September2026DumpImageSize = 0x1D75C000", "September2026DumpImageSize = 0x1D75D000")
+        self.assertProblem(t, "not RetailImageSize")
+
+    def test_fingerprint_never_compared(self):
+        t = self.tree()
+        t.edit("GameBuild.h", " || imageSize == September2026DumpImageSize", "")
+        self.assertProblem(t, "September2026DumpImageSize is defined but never compared against")
+
+    def test_static_assert_disagrees_with_shift(self):
+        t = self.tree()
+        t.edit("GameBuild.h", "SeptemberCodeDelta = 0x10", "SeptemberCodeDelta = 0x20")
+        self.assertProblem(t, "static_assert says get_live_rva(0x2000, September2026)")
+
+    def test_two_shift_ranges_are_a_parse_error(self):
+        t = self.tree()
+        t.edit("GameBuild.h", "SeptemberCodeDelta = 0x10;", "SeptemberCodeDelta = 0x10;\ninline constexpr std::uintptr_t OctoberCodeDelta = 0x8;")
+        self.assertProblem(t, "expected exactly one")
+
+    def test_arxan_declared_size_mismatch(self):
+        t = self.tree()
+        t.edit("Arxan.cpp", "std::array<std::uint8_t, 3> kChecksumPattern2", "std::array<std::uint8_t, 4> kChecksumPattern2")
+        self.assertProblem(t, "kChecksumPattern2 is declared with 4 bytes but lists 3")
+
+    def test_arxan_uncollected_pattern(self):
+        t = self.tree()
+        t.edit("Arxan.cpp", "kChecksumPattern2 = { 0x8B, 0x0C, 0x8B };", "kChecksumPattern2 = { 0x8B, 0x0C, 0x8B };\n    constexpr std::array<std::uint8_t, 1> kChecksumPattern9 = { 0x90 };")
+        self.assertProblem(t, "kChecksumPattern9 is defined but never passed")
+
+    def test_arxan_patch_longer_than_pattern(self):
+        t = self.tree()
+        t.edit("Arxan.cpp", "kChecksumPattern1, kEncryptedPatch1", "kChecksumPattern1, kEncryptedPatch2")
+        self.assertProblem(t, "kEncryptedPatch2 is longer than kChecksumPattern1")
+
+    def test_arxan_patch2_prefix_invariant(self):
+        t = self.tree()
+        t.edit("Arxan.cpp", "kEncryptedPatch2 = { 0x21, 0x58, 0xA0 }", "kEncryptedPatch2 = { 0x21, 0x59, 0xA0 }")
+        self.assertProblem(t, "no longer starts with decrypted kEncryptedPatch1")
+
+    def test_missing_files_are_errors(self):
+        t = self.tree(**{"GameBuild.h": None, "Arxan.cpp": None})
+        problems = self.problems(t)
+        self.assertTrue(any("patch/GameBuild.h: missing" in p for p in problems))
+        self.assertTrue(any("patch/Arxan.cpp: missing" in p for p in problems))
 
     def test_no_patch_dir(self):
         with tempfile.TemporaryDirectory() as d:
             inv = lint.scan(Path(d))
-        self.assertTrue(inv.parse_errors)
+            self.assertTrue(any("not a directory" in p for p in inv.parse_errors))
 
 
 class TestBaseline(LintTestCase):
-    def test_round_trip(self):
+    def written(self):
         t = self.tree()
-        self.assertEqual(t.run("--write-baseline")[0], 0)
-        data = json.loads(t.baseline.read_text())
-        self.assertEqual(data["arxan_tables"]["crc_patch_3"]["count"], 3)
-        self.assertEqual(data["supported_builds"][0]["entry_point"], "0x02BD40FC")
+        code, _, err = t.run("--write-baseline")
+        self.assertEqual(code, 0, err)
+        return t
+
+    def test_round_trip(self):
+        t = self.written()
         code, out, err = t.run("--check")
         self.assertEqual(code, 0, err)
-        self.assertIn("ok", out)
+        self.assertIn("ok:", out)
+        doc = json.loads(t.baseline.read_text())
+        self.assertEqual(doc["format"], lint.BASELINE_FORMAT)
+        self.assertEqual([b["name"] for b in doc["builds"]], ["February2026", "September2026"])
 
     def test_comment_only_edit_is_not_drift(self):
-        t = self.tree()
-        t.run("--write-baseline")
-        t.edit("Hooks.cpp", "void Install()\n", "// a new comment\n\n// pushing lines down\nvoid Install()\n")
+        t = self.written()
+        t.edit("Hooks.cpp", "void Install()", "// a new comment\n// another\nvoid Install()")
         self.assertEqual(t.run("--check")[0], 0)
 
-    def test_count_change_is_drift(self):
-        t = self.tree()
-        t.run("--write-baseline")
-        t.edit("Arxan.h", "0x2000,", "0x2000,\n0x2800,")
+    def test_expected_count_change_is_drift(self):
+        t = self.written()
+        t.edit("Arxan.cpp", "kCrc2ExpectedCount = 2", "kCrc2ExpectedCount = 4")
         code, _, err = t.run("--check")
         self.assertEqual(code, 1)
-        self.assertIn("crc_patch_1: 2 entries in baseline, now 3", err)
+        self.assertIn("expected count 2 in baseline, now 4", err)
 
-    def test_same_count_different_rva_is_drift(self):
-        t = self.tree()
-        t.run("--write-baseline")
-        t.edit("Arxan.h", "0x2000,", "0x2800,")
+    def test_pattern_bytes_change_is_drift(self):
+        t = self.written()
+        t.edit("Arxan.cpp", "kChecksumPattern1 = { 0x8B, 0x0C }", "kChecksumPattern1 = { 0x8B, 0x0D }")
         code, _, err = t.run("--check")
         self.assertEqual(code, 1)
-        self.assertIn("crc_patch_1: same count but", err)
+        self.assertIn("kChecksumPattern1: pattern_bytes changed", err)
 
-    def test_supported_builds_change_is_drift(self):
-        t = self.tree()
-        t.run("--write-baseline")
-        t.edit("Arxan.cpp", "0x02BD40FC }, // retail", "0x02BD40FC },\n\t{ 0x11111111, 0x22222000, 0x00001000 },")
+    def test_build_fingerprint_change_is_drift(self):
+        t = self.written()
+        t.edit("GameBuild.h", "September2026TimeDateStamp = 0x6A7B6355", "September2026TimeDateStamp = 0x6A7B6356")
         code, _, err = t.run("--check")
         self.assertEqual(code, 1)
-        self.assertIn("kSupportedBuilds changed", err)
+        self.assertIn("build fingerprints changed", err)
+
+    def test_shift_change_is_drift(self):
+        t = self.written()
+        t.edit("GameBuild.h", "PrimaryCodeEndRva = 0x5000", "PrimaryCodeEndRva = 0x6000")
+        code, _, err = t.run("--check")
+        self.assertEqual(code, 1)
+        self.assertIn("shift range changed", err)
 
     def test_moved_literal_is_drift(self):
-        t = self.tree()
-        t.run("--write-baseline")
-        t.edit("Hooks.cpp", "REBASE(0x300)", "REBASE(0x304)")
+        t = self.written()
+        t.edit("Hooks.cpp", "*(int*)REBASE(0x300)", "*(int*)REBASE(0x304)")
         code, _, err = t.run("--check")
         self.assertEqual(code, 1)
-        self.assertIn("patch/Hooks.cpp: 0x300 used 0 time(s), baseline 1", err)
         self.assertIn("patch/Hooks.cpp: 0x304 used 1 time(s), baseline 0", err)
 
-    def test_failing_check_also_fails_check_mode(self):
-        t = self.tree()
-        t.run("--write-baseline")
-        t.edit("Arxan.cpp", "kHighestPatchedRva = 0x6000", "kHighestPatchedRva = 0x5000")
+    def test_new_raw_use_is_drift(self):
+        t = self.written()
+        t.edit("Hooks.cpp", "int x =", "auto y = bo3::image_base() + 0x9000;\n\tint x =")
         code, _, err = t.run("--check")
         self.assertEqual(code, 1)
-        self.assertIn("kHighestPatchedRva is 0x5000", err)
+        self.assertIn("new raw image_base() + 0x9000", err)
+
+    def test_failing_check_also_fails_check_mode(self):
+        t = self.written()
+        t.edit("offsets.h", "#define PTR_Foo REBASE(0x1100)", "#define PTR_Foo REBASE(0x1108)")
+        code, _, err = t.run("--check")
+        self.assertEqual(code, 1)
+        self.assertIn("disagreeing RVAs", err)
 
     def test_missing_baseline(self):
-        code, _, err = self.tree().run("--check")
+        t = self.tree()
+        code, _, err = t.run("--check")
         self.assertEqual(code, 1)
         self.assertIn("not found", err)
 
-    def test_default_write_target_is_named_after_the_build(self):
+    def test_old_format_baseline_is_rejected(self):
         t = self.tree()
-        with mock.patch.object(lint, "BASELINE_DIR", t.root):
-            code, out, _ = t.run_default("--write-baseline")
-        self.assertEqual(code, 0, out)
-        written = t.root / "baseline_693D731E.json"
-        self.assertIn(str(written), out)
-        self.assertIn("0x693D731E", json.loads(written.read_text(encoding="utf-8"))["comment"])
-
-    def test_default_write_does_not_overwrite_another_builds_baseline(self):
-        t = self.tree()
-        t.edit("Arxan.cpp", "0x693D731E, 0x1D74B000, 0x02BD40FC", "0x11111111, 0x22222000, 0x00001000")
-        old = t.root / "baseline_693D731E.json"
-        old.write_text("{}\n", encoding="utf-8")
-        with mock.patch.object(lint, "BASELINE_DIR", t.root):
-            code, out, _ = t.run_default("--write-baseline")
-        self.assertEqual(code, 0)
-        self.assertEqual(old.read_text(encoding="utf-8"), "{}\n")
-        self.assertTrue((t.root / "baseline_11111111.json").exists())
-
-    def test_default_write_refuses_a_mismatched_triple(self):
-        t = self.tree()
-        with mock.patch.object(lint, "BASELINE_DIR", t.root):
-            t.run_default("--write-baseline")
-            t.edit("Arxan.cpp", "0x1D74B000, 0x02BD40FC", "0x1D74C000, 0x02BD40FC")
-            before = (t.root / "baseline_693D731E.json").read_text(encoding="utf-8")
-            code, _, err = t.run_default("--write-baseline")
+        t.baseline.write_text(json.dumps({"format": 1}))
+        code, _, err = t.run("--check")
         self.assertEqual(code, 1)
-        self.assertIn("pass --baseline explicitly", err)
-        self.assertEqual((t.root / "baseline_693D731E.json").read_text(encoding="utf-8"), before)
-
-    def test_default_write_refuses_multiple_builds(self):
-        t = self.tree()
-        t.edit("Arxan.cpp", "0x02BD40FC }, // retail", "0x02BD40FC },\n\t{ 0x11111111, 0x22222000, 0x00001000 },")
-        with mock.patch.object(lint, "BASELINE_DIR", t.root):
-            code, _, err = t.run_default("--write-baseline")
-        self.assertEqual(code, 1)
-        self.assertIn("2 entries", err)
-        self.assertEqual(list(t.root.glob("baseline_*.json")), [])
-        # An explicit path is the escape hatch.
-        self.assertEqual(t.run("--write-baseline")[0], 0)
+        self.assertIn("is not 2; regenerate it", err)
 
     def test_refuses_to_bless_a_failing_tree(self):
         t = self.tree()
-        t.edit("Arxan.h", "0x2000,", "0x2000,\n0x1000,")
+        t.edit("offsets.h", "#define PTR_Foo REBASE(0x1100)", "#define PTR_Foo REBASE(0x1108)")
         code, _, err = t.run("--write-baseline")
         self.assertEqual(code, 1)
-        self.assertFalse(t.baseline.exists())
         self.assertIn("refusing", err)
+        self.assertFalse(t.baseline.exists())
+
+    def test_default_baseline_is_the_committed_one(self):
+        self.assertEqual(lint.DEFAULT_BASELINE.name, "baseline_feb2026_rvas.json")
+        self.assertTrue(lint.DEFAULT_BASELINE.is_file())
 
 
 if __name__ == "__main__":
