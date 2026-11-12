@@ -12,6 +12,9 @@ pub use config::PatchConfig;
 
 mod vdf;
 
+mod gamebuild;
+pub use gamebuild::{game_build, game_build_ids_from_bytes, GameBuild, SUPPORTED_GAME_BUILDS};
+
 // ---------- Steam game location ----------
 #[cfg(windows)]
 fn steam_root_from_registry() -> Option<PathBuf> {
@@ -260,9 +263,42 @@ pub fn install_hijack(dir: &Path) -> std::io::Result<InstallReport> {
     // t7patch.dll FIRST, then dsound.dll: the payload before the loader. A failure on the second
     // write then leaves the patch merely inactive, rather than leaving a dsound.dll whose
     // DllMain does LoadLibraryA("t7patch.dll") against a file that is not there.
-    fs::write(dir.join("t7patch.dll"), T7PATCH)?;
-    fs::write(&dsound, DSOUND)?;
+    write_dll(&dir.join("t7patch.dll"), T7PATCH)?;
+    write_dll(&dsound, DSOUND)?;
     Ok(report)
+}
+
+/// Puts `bytes` at `dest`, replacing whatever is there.
+///
+/// Not Windows: write a sibling temp file, then rename it over `dest`. An in-place `fs::write`
+/// truncates the existing inode - and under Wine/Proton a running game has that inode mmap'd as
+/// its loaded image, so truncating it pulls pages out from under live code (SIGBUS, or code
+/// silently changing mid-run). rename(2) swaps the directory entry instead: the running process
+/// keeps the old inode until it exits, and the next launch loads the new file. The temp lives in
+/// the SAME directory because rename is only atomic within one filesystem.
+///
+/// Windows keeps the in-place write. There the loader holds a mapped DLL open without
+/// FILE_SHARE_WRITE, so the write fails cleanly with ERROR_SHARING_VIOLATION, which
+/// is_file_in_use turns into "close the game". A rename over a mapped image would instead fail
+/// with ERROR_ACCESS_DENIED, which is_permission_denied would misreport as a rights problem and
+/// offer to elevate for - elevation that cannot help.
+fn write_dll(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        fs::write(dest, bytes)
+    }
+    #[cfg(not(windows))]
+    {
+        let name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let tmp = dest.with_file_name(format!("{name}.{}.tmp", std::process::id()));
+        // The error returned is always the original one: a failed cleanup must not replace the
+        // write/rename error the caller classifies (is_permission_denied etc.).
+        let result = fs::write(&tmp, bytes).and_then(|()| fs::rename(&tmp, dest));
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        result
+    }
 }
 
 /// Everything T7Patch leaves in the game folder. The two DLLs, the config, and the DLLs' own
@@ -300,15 +336,18 @@ pub fn uninstall_hijack(dir: &Path) -> std::io::Result<()> {
         remove_if_present(&dir.join(name))?;
     }
 
-    // PatchConfig::save writes "t7patch.conf.<pid>.tmp" then renames it into place. A save that
-    // died between the two leaves a file no fixed name above matches, which would survive an
-    // uninstall that promises the folder is as if never installed. Best-effort: a leftover
-    // scratch file must not turn an otherwise complete uninstall into a failure.
+    // PatchConfig::save writes "t7patch.conf.<pid>.tmp" then renames it into place, and (off
+    // Windows) write_dll does the same for both DLLs. A process that died between the two leaves
+    // a file no fixed name above matches, which would survive an uninstall that promises the
+    // folder is as if never installed. Best-effort: a leftover scratch file must not turn an
+    // otherwise complete uninstall into a failure.
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with("t7patch.conf.") && name.ends_with(".tmp") {
+            let ours = ["t7patch.conf.", "t7patch.dll.", "dsound.dll."]
+                .iter().any(|p| name.starts_with(p));
+            if ours && name.ends_with(".tmp") {
                 let _ = fs::remove_file(entry.path());
             }
         }
@@ -326,10 +365,13 @@ pub struct InstallState {
     pub is_game_dir: bool,
     /// A foreign dsound.dll is present - ours is NOT the one that would load.
     pub foreign_dsound: bool,
+    /// BlackOps3.exe's build ids and whether the shipped DLL accepts them. None when the exe is
+    /// missing or not a PE32+. See gamebuild.rs for why `supported: false` is only a warning.
+    pub game_build: Option<GameBuild>,
 }
 
-/// Probes the folder. Cheap enough to call on every relevant change; the only read of any size is
-/// the ~100 KB dsound.dll comparison, and only when one exists.
+/// Probes the folder. Cheap enough to call on every relevant change; the only reads of any size
+/// are the ~100 KB dsound.dll marker scan, only when one exists, and the first 4 KiB of the exe.
 pub fn install_state(dir: &Path) -> InstallState {
     let dsound = dir.join("dsound.dll");
     let dsound_exists = dsound.is_file();
@@ -340,6 +382,7 @@ pub fn install_state(dir: &Path) -> InstallState {
         patch_installed: dir.join("t7patch.dll").is_file(),
         conf_exists: dir.join("t7patch.conf").is_file(),
         is_game_dir: looks_like_game_dir(dir),
+        game_build: game_build(&dir.join(GAME_EXE)),
     }
 }
 
@@ -866,6 +909,53 @@ mod install_tests {
         fs::remove_dir_all(&d).ok();
     }
 
+    /// Reinstalling while the game runs under Wine: the old DLL is mapped, so it must be replaced
+    /// by a new inode, never truncated in place. A handle opened before the reinstall stands in
+    /// for the game's mapping - it has to keep seeing the old bytes, whole.
+    #[cfg(unix)]
+    #[test]
+    fn reinstall_replaces_the_dll_inode_instead_of_truncating_a_mapped_one() {
+        use std::io::Read;
+        use std::os::unix::fs::MetadataExt;
+        let d = tmp("mapped");
+        let old = b"an older t7patch.dll that the running game has mapped".to_vec();
+        fs::write(d.join("t7patch.dll"), &old).unwrap();
+        let mut held = fs::File::open(d.join("t7patch.dll")).unwrap();
+        let old_ino = fs::metadata(d.join("t7patch.dll")).unwrap().ino();
+
+        install_hijack(&d).unwrap();
+
+        let mut seen = Vec::new();
+        held.read_to_end(&mut seen).unwrap();
+        assert_eq!(seen, old, "the in-use file was modified in place");
+        assert_ne!(fs::metadata(d.join("t7patch.dll")).unwrap().ino(), old_ino);
+        assert_eq!(fs::read(d.join("t7patch.dll")).unwrap(), T7PATCH);
+        assert!(is_our_dsound(&d.join("dsound.dll")));
+        let stray: Vec<_> = fs::read_dir(&d).unwrap().flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp")).collect();
+        assert!(stray.is_empty(), "temp files left behind: {stray:?}");
+        fs::remove_dir_all(&d).ok();
+    }
+
+    /// A failed rename must not leave the temp copy behind, and must surface the rename's own
+    /// error (the caller classifies it). A non-empty directory squatting on the name makes
+    /// rename(2) fail portably across Unix filesystems.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_replace_cleans_up_its_temp_file_and_writes_the_loader_last() {
+        let d = tmp("failrename");
+        fs::create_dir_all(d.join("t7patch.dll").join("blocker")).unwrap();
+
+        assert!(install_hijack(&d).is_err());
+        let left: Vec<_> = fs::read_dir(&d).unwrap().flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(left, vec!["t7patch.dll".to_string()],
+                   "expected only the blocking directory: no temp file, and no dsound.dll \
+                    written after the payload failed");
+        fs::remove_dir_all(&d).ok();
+    }
+
     /// Verification now runs against the embedded buffer, before anything is written - so a bad
     /// payload cannot leave an armed install behind while the tool reports failure.
     #[test]
@@ -941,8 +1031,10 @@ mod uninstall_tests {
         for f in ["t7patch.conf", "t7patch-dsound.log", "t7patch_trace.log", "crashes.log"] {
             fs::write(d.join(f), b"x").unwrap();
         }
-        // And a scratch file from a save that died mid-rename.
-        fs::write(d.join("t7patch.conf.4321.tmp"), b"x").unwrap();
+        // And scratch files from a save or install that died mid-rename.
+        for f in ["t7patch.conf.4321.tmp", "t7patch.dll.4321.tmp", "dsound.dll.4321.tmp"] {
+            fs::write(d.join(f), b"x").unwrap();
+        }
 
         uninstall_hijack(&d).unwrap();
 
