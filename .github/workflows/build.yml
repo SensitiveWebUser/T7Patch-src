@@ -538,10 +538,12 @@ jobs:
 
           4. If your copy of Black Ops III is a game build this version of T7Patch does
              not support (usually because the game was updated), the patch refuses to
-             start WITHOUT any message box: the game runs normally but you are NOT
-             protected. Nothing you can change in these steps fixes that; it needs a
-             T7Patch release for that build. The T7Patch installer shows a warning with
-             the values to report when it detects an unsupported build.
+             start and shows a "T7Patch does not support this Black Ops III build"
+             message box listing the values to report. The game keeps running, but you
+             are NOT protected. In fullscreen the box can open BEHIND the game window -
+             Alt+Tab to find it. Nothing you can change in these steps fixes that; it
+             needs a T7Patch release for that build. The T7Patch installer also shows a
+             warning with the same values when it detects an unsupported build.
 
           Settings live in t7patch.conf in the same folder, created on first run.
           TXT

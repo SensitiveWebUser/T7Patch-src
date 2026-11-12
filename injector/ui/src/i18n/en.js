@@ -84,7 +84,7 @@ export default {
   // it does not know, and never forbids installing: the check is the DLL's, not this tool's.
   'build.unsupportedBadge': 'This game build is not supported yet.',
   'build.unsupportedTitle': 'T7Patch does not support this game build yet; the patch will not apply.',
-  'build.unsupportedBody': 'Black Ops III has probably been updated. You can still install, but the game will start without T7Patch\'s protection - and without any message saying so - until a T7Patch release supports this build. If you report it, include these values:',
+  'build.unsupportedBody': 'Black Ops III has probably been updated. You can still install, but the game will start without T7Patch\'s protection until a T7Patch release supports this build. The patch shows a message box when the game starts, which in fullscreen can open behind the game window. If you report it, include these values:',
   'build.supported': 'This game build is supported.',
 
   // --- Onboarding strip ---------------------------------------------------------------------

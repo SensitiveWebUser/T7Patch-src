@@ -476,23 +476,86 @@ void UninstallHook()
     }
 }
 
-// Only called once the build check has already failed, to put the values it compared into the trace
-// log: under Proton exclusive-fullscreen nothing else the user can see says why the patch is off.
-static void LogUnsupportedBuildHeaders()
+// The three header fields a maintainer needs to recognise (or add) a build. EntryPoint is not one
+// bo3::detect_build() checks, but it is reported anyway: it is in every report users have already
+// sent, and the injector's report block (injector/ui/src/lib/format.js formatBuildReport) prints the
+// same three. Returns false, with the outputs zeroed, if the image has no readable PE header.
+static bool ReadGameBuildIds(DWORD& timeDateStamp, DWORD& sizeOfImage, DWORD& entryPoint)
 {
+    timeDateStamp = sizeOfImage = entryPoint = 0;
+
     const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
     const auto* dosHeader = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
     if (!base || dosHeader->e_magic != IMAGE_DOS_SIGNATURE || dosHeader->e_lfanew <= 0)
     {
-        ZLOG("arxan: UNSUPPORTED BUILD - no readable PE header");
-        return;
+        return false;
     }
 
     const auto* ntHeaders = reinterpret_cast<const IMAGE_NT_HEADERS64*>(
         base + static_cast<std::uintptr_t>(dosHeader->e_lfanew));
-    ZLOG("arxan: UNSUPPORTED BUILD - patches NOT applied. TimeDateStamp=%08X SizeOfImage=%08X EntryPoint=%08X",
-        (unsigned)ntHeaders->FileHeader.TimeDateStamp, (unsigned)ntHeaders->OptionalHeader.SizeOfImage,
-        (unsigned)ntHeaders->OptionalHeader.AddressOfEntryPoint);
+    timeDateStamp = ntHeaders->FileHeader.TimeDateStamp;
+    sizeOfImage = ntHeaders->OptionalHeader.SizeOfImage;
+    entryPoint = ntHeaders->OptionalHeader.AddressOfEntryPoint;
+    return true;
+}
+
+// Upstream's only signal here was one OutputDebugStringA line, so after a game update the patch
+// silently stopped protecting anyone: the game runs, looks normal, and is fully exposed. Both
+// failures below leave it in exactly that state, so both get a dialog.
+//
+// The unsupported-build text leads with "the game updated" rather than "your files are broken",
+// since verifying files would only re-download the new build. The three values use the exact field
+// names, alignment and 0x%08X of the injector's formatBuildReport, so a screenshot of this box and a
+// paste from the tool can be compared without normalising either.
+//
+// Under Proton exclusive-fullscreen this box can sit behind the game window. It is kept anyway; the
+// injector warns before launch, and the trace log carries the same values (see the ZLOG below).
+// This runs on the dsound proxy's activation thread, not under the loader lock, so blocking on the
+// dialog holds up only that thread.
+static void ReportInstallFailure(bool supportedBuild, const std::string& reason)
+{
+    DWORD timeDateStamp = 0, sizeOfImage = 0, entryPoint = 0;
+    if (ReadGameBuildIds(timeDateStamp, sizeOfImage, entryPoint))
+    {
+        ZLOG("arxan: patches NOT applied (%s). TimeDateStamp=%08X SizeOfImage=%08X EntryPoint=%08X",
+            supportedBuild ? "supported build" : "UNSUPPORTED BUILD",
+            (unsigned)timeDateStamp, (unsigned)sizeOfImage, (unsigned)entryPoint);
+    }
+    else
+    {
+        ZLOG("arxan: patches NOT applied - no readable PE header");
+    }
+
+    char message[1024]{};
+    if (!supportedBuild)
+    {
+        snprintf(message, sizeof(message),
+            "T7Patch does not support this Black Ops III build, so it has not loaded.\n\n"
+            "This usually means the game was updated. Check for a new version of T7Patch - "
+            "verifying your game files will not help.\n\n"
+            "Please include these values in any report:\n"
+            "  TimeDateStamp: 0x%08X\n"
+            "  SizeOfImage:   0x%08X\n"
+            "  EntryPoint:    0x%08X",
+            (unsigned)timeDateStamp, (unsigned)sizeOfImage, (unsigned)entryPoint);
+    }
+    else
+    {
+        // A recognised build whose Arxan checksum sites did not match the expected pattern counts
+        // (or could not be written). The build check passed, so pointing at "the game updated" would
+        // mislead; the reason string from arxan_bypass::install is the useful part.
+        snprintf(message, sizeof(message),
+            "T7Patch could not apply its Arxan integrity bypass, so it has not loaded and the game "
+            "is running without its protections.\n\n"
+            "Reason: %s\n\n"
+            "Please include these values in any report:\n"
+            "  TimeDateStamp: 0x%08X\n"
+            "  SizeOfImage:   0x%08X\n"
+            "  EntryPoint:    0x%08X",
+            reason.c_str(), (unsigned)timeDateStamp, (unsigned)sizeOfImage, (unsigned)entryPoint);
+    }
+
+    MessageBoxA(nullptr, message, "T7Patch", MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND);
 }
 
 void RunPatching()
@@ -508,12 +571,9 @@ void RunPatching()
     if (!arxan_bypass::install(arxanMessage))
     {
         ZLOG("arxan: install FAILED: %s", arxanMessage.c_str());
-        if (!bo3::supported_build())
-        {
-            LogUnsupportedBuildHeaders();
-        }
-        arxanMessage = "T7 Patch: " + arxanMessage + "\n";
-        OutputDebugStringA(arxanMessage.c_str());
+        // Kept: upstream's only signal, and still what a debugger attached to the game shows.
+        OutputDebugStringA(("T7 Patch: " + arxanMessage + "\n").c_str());
+        ReportInstallFailure(bo3::supported_build(), arxanMessage);
         return;
     }
     ZLOG("arxan: %s", arxanMessage.c_str());
@@ -563,6 +623,16 @@ EXPORT void zbr_run_gamemode_lui(const char* input)
 
 EXPORT void Unload()
 {
+    // Everything below restores game memory and pointers that only exist once RunPatching got past
+    // the Arxan step: uninstall() writes Old_lobbymsgprints (still 0) over a live game pointer and
+    // UninstallHook() calls into a hardcoded game address. On an unsupported build those are not
+    // even the right addresses. With nothing installed there is nothing to undo.
+    if (!arxan_bypass::active())
+    {
+        ZLOG("unload: ignored - the patch is not installed");
+        return;
+    }
+
     ZLOG("unload: begin");
     HANDLE hThreadSnap = INVALID_HANDLE_VALUE;
     THREADENTRY32 te32;

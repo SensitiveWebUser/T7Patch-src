@@ -41,8 +41,8 @@ function hex32(n) {
 /**
  * The block a user pastes into a report when their BlackOps3.exe is not a build the patch knows.
  *
- * Byte-for-byte the three lines of patch/Arxan.cpp's unsupported-build MessageBox, minus the
- * two-space indent the dialog uses to set them off from its prose. Same field names, same column
+ * Byte-for-byte the three lines of the unsupported-build MessageBox (patch/dllmain.cpp
+ * ReportInstallFailure), minus the two-space indent the dialog uses to set them off from its prose. Same field names, same column
  * alignment, same `%08X`: a maintainer should be able to match a report from this tool against one
  * copied out of the game's dialog (or grep a ZLOG line) without having to normalise either.
  *

@@ -138,6 +138,8 @@ implementation did. That implementation is parked, unbuilt, in `LeaveJustInCase/
 - **Windows** — run `dev/out/T7Patch-win-x64.exe`, or copy both DLLs for a
   manual `dsound.dll` install.
 
-See AGENTS.md for why the lowercase name matters. The current patch has no trace log: an
-unsupported game build is reported only via `OutputDebugStringA` (visible in a debugger or
-DebugView), so the dsound proxy's `t7patch-dsound.log` is the only file-based diagnostic.
+See AGENTS.md for why the lowercase name matters. On an unsupported game build, or if the Arxan
+bypass fails on a supported one, the patch does not start and shows a message box with the
+TimeDateStamp/SizeOfImage/EntryPoint values to report (under Proton fullscreen it can open behind
+the game window). With `debuglog=1` in `t7patch.conf` the same values go to `t7patch_trace.log`;
+without it, the dsound proxy's `t7patch-dsound.log` is the only file-based diagnostic.

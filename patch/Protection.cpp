@@ -196,6 +196,16 @@ EXPORT void SetPlayerName(const char* name)
     strcpy_s(Protection::CustomName, name);
     Protection::CustomName[sizeof(Protection::CustomName) - 1] = 0;
 
+    // The name is kept above either way; Protection::install() reapplies it from t7patch.conf once
+    // the patch is live. The two writes below are hardcoded game addresses, valid only on a build
+    // the Arxan step accepted - on any other they land on unrelated memory. This export can be
+    // called before RunPatching, or after it refused the build, by anything in the process.
+    if (!arxan_bypass::active())
+    {
+        ZLOG("cfg: playername kept but not written to game memory - patch not installed");
+        return;
+    }
+
     strncpy_s((char*)(pUserData + 0x8), 16, Protection::CustomName, sizeof(Protection::CustomName));
     strncpy_s((char*)(pNameBuffer), 16, Protection::CustomName, sizeof(Protection::CustomName));
 }
@@ -210,8 +220,7 @@ EXPORT void SetNetworkPassword(const char* pass)
     {
         Protection::SetNetworkPassword(GSCUHashing::canon_hash64(pass));
     }
-    ZLOG("cfg: password %s, prefix=%02X,%02X", *pass ? "SET" : "cleared",
-        ZBR_PREFIX_BYTE, ZBR_PREFIX_BYTE2);
+    ZLOG("cfg: password %s", *pass ? "SET" : "cleared");
 }
 
 IHOOK_HEADER(IsProcessorFeaturePresent, BOOL, (DWORD processorFeature))
@@ -1133,10 +1142,10 @@ void Protection::install()
         CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
     }
 
-    ZLOG("session: %s | route=%s | name=\"%s\" | friendsOnly=%d | autoInstallMods=%d | prefix=%02X,%02X",
+    ZLOG("session: %s | route=%s | name=\"%s\" | friendsOnly=%d | autoInstallMods=%d | password=%s",
         ZBR_VERSION_FULL, Protection::IsInjectorlessInstall ? "injectorless" : "injector",
         Protection::CustomName, (int)Protection::IsFriendsOnly, (int)Protection::IsAutoInstallModsEnabled,
-        ZBR_PREFIX_BYTE, ZBR_PREFIX_BYTE2);
+        ZBR_PREFIX_BYTE ? "set" : "none");
 }
 
 void Protection::uninstall()

@@ -646,8 +646,9 @@ namespace hooks {
 			if (!matches)
 			{
 				// Fires per rejected packet: with debuglog on, a flood of these is a frame-time cost.
-				ZLOG("prepReadMsg: REJECTED wire=%02X,%02X expected=%02X,%02X",
-					prefix1, prefix2, ZBR_PREFIX_BYTE, ZBR_PREFIX_BYTE2);
+				// No bytes logged: both prefixes are 16 bits of a password hash, and trace logs get
+				// posted in public bug reports.
+				ZLOG("prepReadMsg: REJECTED lobby message (password prefix mismatch)");
 			}
 			return matches;
 		}
