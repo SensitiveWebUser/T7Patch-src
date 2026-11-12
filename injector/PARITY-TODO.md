@@ -21,7 +21,7 @@ several of these behaviours still exist in working form. Read it before reimplem
 - **Here:** injector/ui/src/App.jsx:24 defines `inject: (pid) => invoke('inject_into', { pid })` and nothing else in the file ever calls `CMD.inject` — grep for inject/Inject across injector/ui/src/ returns that single line. There is no process enumeration, no PID input, and no button; grep for pid|process in App.jsx returns only line 5 (plugin-process import) and line 24.
 - **Fix:** Add a Windows-only "Live injection" section to the Advanced page. It needs a backend command that enumerates BlackOps3.exe processes and returns verified (pid, main-module path) pairs, plus a file picker for the DLL, then calls inject_into with both — mirroring MainForm.cs:907-963. Gate its visibility on a `cfg!(windows)` command the way linux_launch_option already is (main.rs:74-81).
 
-## Major (9 open of 14)
+## Major (7 open of 14)
 
 ### [locate] Windows: only the first registry hit is used and there is no Program Files fallback, so one bad value means zero detection
 
@@ -60,6 +60,10 @@ several of these behaviours still exist in working form. Read it before reimplem
 
 ### [update] No launch-time automatic check; toolcheckforupdatesonlaunch is parsed, saved, and ignored
 
+> **Partially addressed.** The Advanced page now has the checkbox, bound to
+> `cfg.toolcheckforupdatesonlaunch` in `ui/src/App.jsx`. Nothing reads the value at startup yet,
+> so the box still controls a check that never runs.
+
 - **Impact:** Users who never open the Advanced page and click "Check now" are never told about a new release, which is the case the silent launch check exists for. Worse, the preference is visible in t7patch.conf and defaults to enabled, so the file asserts a behaviour the tool does not have — and the UI offers no checkbox to turn the (non-existent) behaviour off.
 - **Reference:** LeaveJustInCase/injector/T7Patch.Injector.UI/MainForm.cs:285-288 runs CheckForUpdates(silent: true) at startup; the preference has a real checkbox at MainForm.cs:33, loaded at :689 and saved at :732, defaulting true at LeaveJustInCase/injector/T7Patch.Injector.Core/PatchConfig.cs:31
 - **Here:** injector/core/src/config.rs:33,47,132-136,163-166 declares/defaults/parses/writes toolcheckforupdatesonlaunch, but injector/ui/src/App.jsx:99-111 (the only mount effect) only locates the game and loads config — no update call — and no occurrence of toolcheckforupdatesonlaunch exists anywhere in injector/ui/src
@@ -79,23 +83,8 @@ several of these behaviours still exist in working form. Read it before reimplem
 - **Here:** injector/ui/src/App.jsx:134-149 (doInstall calls CMD.install(dir) only; no CMD.save anywhere in the function) and App.jsx:184 (the wizard's Install step calls the same doInstall)
 - **Fix:** In doInstall, after a successful CMD.install, call CMD.save(dir, cfg) and log both outcomes - matching MainForm.cs:810-811 and the two-part result string at Strings.resx:92-94.
 
-### [ui] Wizard's Done step reports success even when the install failed
+## Minor (44 open of 52)
 
-- **Impact:** If the install threw (permission denied and elevation declined, bad path, missing exports) or no folder was ever picked, the final wizard screen still says T7Patch is installed and settings saved. The truth is one collapsed <details> pane away. The .NET wizard says 'No game folder was set - nothing was installed' in exactly this case.
-- **Reference:** LeaveJustInCase/injector/T7Patch.Injector.UI/Wizard/Steps.cs:196 and 238 (Install and Done steps show _session.InstallStatusText / DoneResultText) backed by LeaveJustInCase/injector/T7Patch.Injector.UI/Wizard/SetupSession.cs:504-516, 566-580, which carries the real install + config result, including Wizard_InstallSkippedNoGameDirectory
-- **Here:** injector/ui/src/App.jsx:161 (`{last && 'T7Patch is installed and your settings have been saved.'}` - a literal, unconditional on outcome) with the actual result going only to the log at App.jsx:137 and 147
-- **Fix:** Store doInstall's result/error in state and render it on step 4 in place of the literal, with a separate no-folder message, mirroring SetupSession.InstallStatusText/DoneResultText.
-
-### [ui] Wizard Done step omits the Linux Steam launch-option field
-
-- **Impact:** A Linux/Proton user who completes the wizard is told 'T7Patch is installed and your settings have been saved' and never sees WINEDLLOVERRIDES="dsound=n,b" %command%. Without it the hijack is not picked up and the patch does nothing - the one step the wizard exists to prevent them from missing.
-- **Reference:** LeaveJustInCase/injector/T7Patch.Injector.UI/Wizard/Steps.cs:227-231 (non-Windows: Wizard_DoneLinuxLaunchOptionBody + LaunchOptionField); text at Resources/Strings.resx:90 ('One more step Wine needs directly...')
-- **Here:** injector/ui/src/App.jsx:151-193 - the wizard branch renders no launch-option row on any step; the row exists only on the Advanced page (App.jsx:244-258), which a wizard user has not visited
-- **Fix:** Render the launchOption row (already fetched at App.jsx:111) on the final wizard step when it is non-null, with the Strings.resx:90 copy.
-
-## Minor (52)
-
-- **[config]** Uninstall leaves t7patch.conf (with the cleartext network password), the DLL's logs, and its own temp files in the game folder
 - **[config]** The tool's own three preference keys are written but never read or surfaced — no auto-launch, no launch-time update check, no last-seen-tag suppression
 - **[config]** Empty `playername=` overwrites the name instead of preserving it, dropping the DLL's deliberate asymmetry
 - **[config]** Config keys are matched case-insensitively, but the DLL matches them case-sensitively
@@ -108,13 +97,10 @@ several of these behaviours still exist in working form. Read it before reimplem
 - **[locate]** A libraryfolders.vdf that is not valid UTF-8 drops every library silently
 - **[locate]** Locator paths are lossily converted to String at the Tauri boundary
 - **[locate]** No test coverage of Steam-library discovery on the Rust side
-- **[install]** Copy order is reversed: the loader is written before the payload
 - **[install]** Install reports failure after it has already installed both files
-- **[install]** Uninstall leaves t7patch.conf, the three log files, and scratch .tmp files behind
-- **[install]** Uninstall has no elevation handling and no confirmation
-- **[install]** A hand-picked folder is never checked for BlackOps3.exe
+- **[install]** Uninstall has no elevation handling (the confirmation half is fixed - see below)
 - **[install]** Installing never writes t7patch.conf, while the wizard claims it did
-- **[install]** The Linux launch option is absent from the wizard and from the install result
+- **[install]** The Linux launch option is absent from the install result (the wizard half is fixed - see below)
 - **[install]** No fallback when the payload is absent - and no way to install a hand-picked DLL pair
 - **[install]** Export verification checks 1 of the 6 exports, and not the two the loader actually calls
 - **[install]** Elevation is triggered without asking, and exits with a pending config save in flight
@@ -132,23 +118,47 @@ several of these behaviours still exist in working form. Read it before reimplem
 - **[update]** Release tag is accepted with no length or control-character validation
 - **[update]** "Check now" has no in-flight guard and no minimum visible duration
 - **[update]** Response body cap is 10x looser than the .NET side's
-- **[ui]** Uninstall is destructive with no confirmation and leaves t7patch.conf and logs behind
 - **[ui]** 'Auto-launch on startup' setting has no UI and no behaviour
 - **[ui]** Elevation happens without asking the user, contradicting the code's own comment
 - **[ui]** Layout ignores the desktop font and the window is a fixed pixel size
-- **[ui]** No localisation seam - every string is a hardcoded English literal
 - **[ui]** Picking a folder with no BlackOps3.exe in it produces no warning
 - **[ui]** Wizard Settings step is missing two of the four settings it should surface
 - **[ui]** No manual file-picker install path
-- **[ui]** Status log has no Clear button and does not scroll to the newest line
 - **[ui]** Pending debounced save is lost on window close and on the elevate path
 - **[ui]** 'Check now' can be re-entered and swallows failures
 - **[ui]** Actions with no game folder fail silently instead of saying why
 - **[ui]** No tooltips and no live-region announcement for status
 - **[ui]** Version label and window identity are hardcoded and divergent
-- **[ui]** Generated password uses a biased modulo over crypto bytes
 
 ## Fixed since the audit
+
+Re-triaged against the code during the rebuild plan's Phase 1 (`docs/REBUILD-PLAN.md`). Only
+items whose fix is visible in the source are listed; anything partly done stays open above with a
+note.
+
+- **[ui] Wizard's Done step reports success even when the install failed** - the final step of
+  `ui/src/Wizard.jsx` (`id: 'play'`) shows `onboard.doneBody` only behind `allDone`, which is the
+  same three probed install-state booleans the step ticks are drawn from, not the outcome of a
+  button press.
+- **[ui] Wizard Done step omits the Linux Steam launch-option field** - that same step renders the
+  launch option with a Copy button whenever `launchOption` is non-null, and refuses to tick green
+  on Linux for that reason.
+- **[install]/[config]/[ui] Uninstall leaves t7patch.conf, the logs and scratch .tmp files
+  behind** - `uninstall_hijack` (`core/src/lib.rs`) removes every name in `INSTALLED_FILES`
+  (`t7patch.conf`, `t7patch-dsound.log`, both trace logs, `crashes.log`, ...) and sweeps our own
+  `*.tmp` leftovers. The UI asks `confirmUser` before calling it.
+- **[install] Copy order is reversed** - `install_hijack` writes `t7patch.dll` before `dsound.dll`,
+  with a comment saying why.
+- **[install] A hand-picked folder is never checked for BlackOps3.exe** - `InstallReport` carries
+  `not_a_game_dir` and the UI logs `warn.installedIntoNonGameDir`. It warns rather than refuses;
+  the separate "[ui] no warning at pick time" item stays open.
+- **[ui] No localisation seam** - every string goes through `t()` from `ui/src/i18n/`, which has
+  its own README on adding a catalogue.
+- **[ui] Status log has no Clear button and does not scroll to the newest line** -
+  `ui/src/components/StatusLog.jsx` takes `onClear` (wired in App.jsx) and pins `scrollTop` to the
+  bottom.
+- **[ui] Generated password uses a biased modulo** - `ui/src/lib/password.js` uses rejection
+  sampling, and says why in its comment.
 
 - **[config] A conf that is not valid UTF-8 silently reset every setting** - `load` read with
   `read_to_string`, which errors on a single bad byte, and every error mapped to `default()`; the

@@ -1,7 +1,8 @@
 # injector/ — the T7Patch installer tool
 
 The injector, as **Tauri 2 (Rust + system webview) with a React frontend**. `./dev/build --injector`
-builds it; CI's `tauri-linux` / `tauri-win` jobs release it.
+builds it; CI's `injector-linux` / `injector-win` jobs build it, and the `release` job publishes
+both on a `v*` tag.
 
 It began as an evaluation against the previous .NET + Eto.Forms implementation, and most of this
 file is still the measurements from that comparison — they are kept because they are the honest
@@ -16,7 +17,7 @@ closing them.
 
 | Build | Linux x64 | Notes |
 | --- | ---: | --- |
-| `injector/` (.NET 10 + Eto.Forms, shipping) | **42,057,057 B** | ~42 MB |
+| .NET 10 + Eto.Forms (the previous implementation, now parked) | **42,057,057 B** | ~42 MB |
 | Tauri + React, as first built (local, mingw payload) | **9,518,040 B** | ~9.5 MB |
 | Tauri + React, after the size pass (local, mingw payload) | **5,404,320 B** | ~5.4 MB |
 
@@ -61,7 +62,7 @@ requires from the machine at load time (`ldd`, link-time `DT_NEEDED` entries):
 
 - **Tauri:** `libwebkit2gtk-4.1`, `libjavascriptcoregtk-4.1`, `libsoup-3.0`, `libgtk-3`, cairo,
   dbus — all **link-time**.
-- **`injector/`:** `libc`, `libm`, `libdl`, `libpthread`, `librt`, `libgcc_s`, `libstdc++` — the
+- **.NET + Eto.Forms:** `libc`, `libm`, `libdl`, `libpthread`, `librt`, `libgcc_s`, `libstdc++` — the
   glibc baseline. GTK is loaded later, via `dlopen`, from managed code.
 
 That difference is the whole argument. A Tauri binary on a machine without webkit2gtk **does not
@@ -91,11 +92,12 @@ impossible for a frontend change to alter installer behaviour, and it is why `ca
 -p t7patch-core` runs in a second with no webview toolchain present — which is also how CI gates
 the build before paying for a full webview link.
 
-`core/` is ~600 lines across `lib.rs` and `config.rs`: config load/save (atomic temp+rename, in
-the format `patch/Protection.cpp` itself reads), Steam library discovery (registry on Windows,
-`$HOME` probing plus VDF parsing on Linux), install/uninstall of the embedded DLLs, a PE
-export-directory walk with RVA resolution, the GitHub update check over rustls, Steam launch,
-elevation, and the Windows inject-and-activate path.
+`core/` holds config load/save (atomic temp+rename, in the format `patch/Protection.cpp` itself
+reads), Steam library discovery (registry on Windows, `$HOME` probing plus VDF parsing on Linux),
+install/uninstall of the embedded DLLs, a PE export-directory walk with RVA resolution, Steam
+launch, elevation, and the Windows inject-and-activate path. The GitHub update check is *not*
+here any more: it moved to `ui/src/lib/updates.js` (see the size table above), and `lib.rs`
+keeps a tombstone saying so.
 
 Reimplementing all of that is the honest cost of this stack: ~13 native integrations rewritten and
 re-tested on two platforms. `PARITY-TODO.md` is what is left of that bill.
@@ -109,9 +111,10 @@ re-tested on two platforms. `PARITY-TODO.md` is what is left of that bill.
 That is one command from a clean checkout: `--injector` forces the DLL build (the Rust core embeds
 the pair with `include_bytes!`), stages it into `assets/`, and then runs the Tauri build in a
 **second container image** — a Rust toolchain plus the WebKitGTK *development* headers, roughly
-2 GB — that is built only the first time you pass `--injector`. A normal `./dev/build` never
-downloads it, which is the point: this is an evaluation, and the shipping path should not carry
-its toolchain. Combine flags freely; `--injector --injector` builds both tools from one DLL build.
+2 GB — that is built only the first time you pass `--injector`. A `./dev/build --dll` run never
+downloads it, which is the point: a DLL-only build should not carry the tool's toolchain. Combine
+flags freely; `--dll --injector` (also what a bare `./dev/build` means) keeps the loose DLLs in
+`dev/out/` as well as embedding them, from one DLL build.
 
 `--shell --injector` drops into that image (cargo, bun) instead of the default one.
 
@@ -138,8 +141,8 @@ file picker) a **missing payload here is a compile error**. `dev/build --injecto
 for you, from that same run's freshly built pair - only a manual, no-container build has to do it
 by hand.
 
-**Windows is cross-compiled too**, so `--injector` matches `--injector` in producing both platforms
-from one Linux container: `dev/out/T7Patch-win-x64.exe`. It goes through `cargo-xwin`, which
+**Windows is cross-compiled too**, so `--injector` produces both platforms from one Linux
+container, as the .NET build did: `dev/out/T7Patch-win-x64.exe`. It goes through `cargo-xwin`, which
 fetches Microsoft's own CRT and Windows SDK on first use and targets `x86_64-pc-windows-msvc` (the
 MSVC ABI, which is what WebView2 expects — mingw is not a supported path here), with clang, lld and
 llvm-rc supplying the compiler, linker and resource compiler.
@@ -209,22 +212,20 @@ The reference implementation is parked, unbuilt, in `../LeaveJustInCase/injector
 
 **Verified here**, by bootstrapping a Rust and C toolchain plus the WebKitGTK headers into the
 sandbox: the **whole Rust tree compiles**, including the Tauri shell, and links to a real 9,515,928
-byte release binary. 7 unit tests pass, covering the config format taken from `patch/Protection.cpp`
-itself and the PE parser against truncated, zeroed and garbage input plus the real embedded
-`t7patch.dll`. The frontend-embedding fix is confirmed by A/B on the built binary. The compiled-in
+byte release binary. The core's unit tests (`cargo test -p t7patch-core`) cover the config format
+taken from `patch/Protection.cpp` itself, the VDF scanner, and the PE parser against truncated,
+zeroed and garbage input plus the real embedded `t7patch.dll`; the frontend has its own suite
+(`cd ui && bun test`). No count is given here on purpose: this paragraph used to say "7 unit
+tests" long after there were more, so run the suites rather than trusting a number in prose. The frontend-embedding fix is confirmed by A/B on the built binary. The compiled-in
 CSP was read back out of it. `core` has zero Tauri/WebKit/GTK dependencies. The React frontend
 builds under Vite 8 + bun.
 
-**Not verified:** no Tauri binary has been run to a usable window from this repo. The Windows
-cross-build leg (`cargo-xwin`) has never been executed and is the least proven part of the setup -
-`dev/build --injector` treats its failure as non-fatal for exactly that reason. Nothing has been run
-on Windows at all.
-
-**Still not verified:** no Tauri binary has been run to a usable window. Running the release binary
-here dies in `ld.so` on a missing `libfribidi.so.0` before `main()` is ever entered - which is a
-live demonstration of the link-time argument above rather than a defect in the app, and is why the
-panic hook cannot help in that case. Nothing has been run on Windows at all, and the `cargo-xwin`
-cross-build leg has never been executed.
+**Not verified:** no Tauri binary has been run to a usable window from this repo. Running the
+release binary here dies in `ld.so` on a missing `libfribidi.so.0` before `main()` is ever entered -
+which is a live demonstration of the link-time argument above rather than a defect in the app, and
+is why the panic hook cannot help in that case. The Windows cross-build leg (`cargo-xwin`) has
+never been executed and is the least proven part of the setup - `dev/build --injector` treats its
+failure as non-fatal for exactly that reason. Nothing has been run on Windows at all.
 
 `main.rs` also sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` and `WEBKIT_DISABLE_COMPOSITING_MODE=1` on
 Linux unless the user has. That was first added as a guess at the "opens then closes" report and
@@ -244,5 +245,7 @@ supports in practice. The .NET tool does not build for macOS either - `dev/build
 and linux-x64 only - so this is a new requirement, not a regression. A `macos-latest` CI runner is
 the realistic route for both stacks.
 
-The React frontend deliberately has no styling ambition. Making it prettier than the Eto UI would
-turn a stack comparison into a design comparison and invite the wrong conclusion.
+While this was a stack comparison, the React frontend deliberately had no styling ambition:
+making it prettier than the Eto UI would have turned it into a design comparison and invited the
+wrong conclusion. That comparison is settled, and the UI has since been given its own theme
+(`ui/src/theme.css`) and per-component styles under `ui/src/components/`.

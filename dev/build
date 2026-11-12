@@ -105,6 +105,11 @@ EOF
 # Kept separate from the one above rather than merged into it because merging would put a Rust
 # toolchain and the WebKitGTK development headers - ~2GB - on the path of every DLL build, which
 # needs none of it. Tagged by its own hash, so editing this function rebuilds only this image.
+#
+# Known wart, left alone on purpose: the cargo-xwin comment inside the heredoc below reads "as the
+# .NET build Linux container." - it means "as the .NET build did". It is NOT fixed in place because
+# the heredoc's text, comments included, is hashed into the image tag, so correcting a word there
+# would force every machine to re-download and rebuild this ~2GB image for no functional change.
 injector_dockerfile() {
     cat <<'EOF'
 # Debian rather than the rust:* image so the WebKitGTK packages come from one apt source at a
@@ -245,7 +250,7 @@ if [ -z "${T7PATCH_IN_CONTAINER:-}" ]; then
         # dirs, so an interactive shell would start with a HOME that doesn't exist and confuse
         # anything that assumes it does (rc files, a bare `cd`). Recreate the dirs
         # first so --shell matches a real build. $out is deliberately not in this list: it's
-        # a host path ($here/out), already created at line 182 and bind-mounted into the
+        # a host path ($here/out), already created by the mkdir just above and bind-mounted into the
         # container - baking it into a container-side mkdir tried to create the host's own
         # directory tree (e.g. /home/user/...) from inside the container, which failed outright
         # under Docker (no permission to create /home) and, under rootless Podman, silently
@@ -558,7 +563,7 @@ build_injector() {
     # Cross-compiled with cargo-xwin against Microsoft's own CRT and SDK. Deliberately NOT fatal:
     # it needs a first-run download from Microsoft, so it is the one step here that can fail for
     # reasons that have nothing to do with the code, and the Linux binary above is already a
-    # usable deliverable. The RELEASE Windows build is CI's injector-win job on windows-latest
+    # usable deliverable. The RELEASE Windows build is CI's injector-win job on windows-2025-vs2026
     # with a real MSVC toolchain; this leg is local convenience.
     step "Cross-compiling for win-x64 ($profile profile, MSVC ABI via cargo-xwin)"
     if cargo xwin build --profile "$profile" --target x86_64-pc-windows-msvc -p t7patch-ui; then
@@ -570,7 +575,7 @@ build_injector() {
         fi
     else
         note "WINDOWS CROSS-BUILD FAILED. The linux-x64 binary above is unaffected."
-        note "CI's injector-win job builds this on windows-latest and is the release path."
+        note "CI's injector-win job builds this on windows-2025-vs2026 and is the release path."
     fi
 
     note ""

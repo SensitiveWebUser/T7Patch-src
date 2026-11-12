@@ -9,7 +9,7 @@ this repo.
 ```
 ./dev/build                  the DLLs, then the injector tool  ->  dev/out/
 ./dev/build --dll            just the DLLs (all a Linux/Proton install needs)
-./dev/build --injector          just the injector tool (linux-x64 + win-x64)
+./dev/build --injector       just the injector tool (linux-x64 + win-x64)
 ./dev/build --debug          -Og -g instead of -O2
 ./dev/build --release        -O2 (the default; only useful to override --debug)
 ./dev/build --shell          drop into the container
@@ -107,7 +107,7 @@ pair is cleared out of `dev/out/`. Ask for `--dll` (or run with no flags, which 
 `--dll --injector`) and the raw `dev/out/dsound.dll` and `dev/out/t7patch.dll` stay put as well.
 
 The Windows leg cross-compiles from the same Linux container via `cargo-xwin`, against Microsoft's
-own CRT and Windows SDK. CI does not use it — `tauri-win` runs on `windows-latest` with the real
+own CRT and Windows SDK. CI does not use it — `injector-win` runs on `windows-2025-vs2026` with the real
 MSVC toolchain, because a release should not depend on a reimplementation of the linker
 environment when a real one is free there.
 
