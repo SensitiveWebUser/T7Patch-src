@@ -54,8 +54,9 @@ only MSVC builds from Windows.**
 
 Most likely divergences: the C runtime (mingw's, not the UCRT, including the ~30
 `*_s` calls), unwinding around the `KiUserExceptionDispatcher` hook, and inlining
-in the packet paths. Struct layouts are covered by `static_assert`s, so a padding
-difference fails the build rather than corrupting a packet.
+in the packet paths, and struct layout: the current patch has no `static_assert`s
+pinning its game structs (an earlier hardened revision did), so a padding difference
+between the two compilers would not fail the build.
 
 **One hook is inert here.** `__report_gsfailure` is an MSVC CRT internal that
 `Hooks.cpp` detours; mingw has no equivalent, so a stub stands in. Nothing else
@@ -69,8 +70,8 @@ Two other deliberate differences from the vcxproj:
 - **`<Winternl.h>` and `<TlHelp32.h>` get case-correcting symlinks.** MSVC's SDK
   is case-insensitive; mingw ships them lowercase and Linux is not.
 
-After linking, the script reads the PE export directory and checks the six names
-the loader and injector resolve. A DLL missing them loads fine and silently does
+After linking, the script reads the PE export directory and checks the seven names
+the DLL exports (the loader and injector resolve a subset of them). A DLL missing them loads fine and silently does
 nothing, which is indistinguishable from the patch not working. `dsound.dll` gets
 the same treatment further down the build: the script checks it exports all 12 of
 the DirectSound entry points it proxies (see the dsound.dll section below).
@@ -137,4 +138,6 @@ implementation did. That implementation is parked, unbuilt, in `LeaveJustInCase/
 - **Windows** — run `dev/out/T7Patch-win-x64.exe`, or copy both DLLs for a
   manual `dsound.dll` install.
 
-See AGENTS.md for why the lowercase name matters and for the trace-log workflow.
+See AGENTS.md for why the lowercase name matters. The current patch has no trace log: an
+unsupported game build is reported only via `OutputDebugStringA` (visible in a debugger or
+DebugView), so the dsound proxy's `t7patch-dsound.log` is the only file-based diagnostic.

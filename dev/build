@@ -470,8 +470,9 @@ build_dll() {
         objs+=("$obj/${s%.cpp}.o")
     done
 
-    # patch/T7Patch.vcxproj links only libMinHook.x64.lib (no detours.lib), so this
-    # matches it - nothing else to link here.
+    # patch/T7Patch.vcxproj also links patch/detours/detours.lib, but no source calls a Detours
+    # API (nothing includes detours.h), and an MSVC-built .lib will not link against mingw anyway.
+    # Leaving it out is therefore equivalent, not a gap - revisit if a Detour* call ever appears.
     note "linking"
     $CXX -shared -o "$out/t7patch.dll" "${objs[@]}" -static \
         -lkernel32 -luser32 -ladvapi32 -lws2_32 -lshell32 -lole32 -lpsapi \
@@ -482,7 +483,7 @@ build_dll() {
 
     local missing=""
     for sym in EnableInjectorlessInstall zbr_run_gamemode_lui Unload \
-               SetPlayerName SetNetworkPassword SetFriendsOnly; do
+               SetPlayerName SetNetworkPassword SetFriendsOnly SetAutoInstallMods; do
         grep -qx "$sym" <<<"$exports" || missing="$missing $sym"
     done
 
@@ -601,7 +602,8 @@ if [ "$stage_injector_assets" = 1 ]; then
     # and friends) plus a COFF symbol table, none of which the loader reads.
     #
     # Exports come from the PE export DIRECTORY, not the symbol table, so --strip-all cannot
-    # remove them - verified after stripping: t7patch.dll keeps all 6 including the
+    # remove them - verified after stripping: t7patch.dll kept all its exports (6 at the time;
+    # SetAutoInstallMods since made it 7), including the
     # EnableInjectorlessInstall/zbr_run_gamemode_lui pair the loader calls, dsound.dll keeps all
     # 12 DirectSound trampolines. The verification step below re-checks this on every build rather
     # than trusting that measurement to hold.

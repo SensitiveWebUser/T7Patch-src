@@ -36,7 +36,7 @@ jobs:
       # No objdump on a stock windows-latest runner (that's the mingw jobs' tool), and no dumpbin
       # without a Developer Command Prompt setup we don't otherwise need - so this reads the
       # PE32+ export directory by hand from raw bytes, using only BCL types PowerShell always
-      # has loaded (no Add-Type/NuGet). Same six symbols and list-missing-then-::error:: shape
+      # has loaded (no Add-Type/NuGet). Same seven symbols and list-missing-then-::error:: shape
       # as the other three build jobs' equivalent step, but this is the one that actually checks
       # the DLL that ships (see the comment above this job).
       - name: Verify exported symbols
@@ -45,7 +45,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           $required = @(
             "EnableInjectorlessInstall", "zbr_run_gamemode_lui", "Unload",
-            "SetPlayerName", "SetNetworkPassword", "SetFriendsOnly"
+            "SetPlayerName", "SetNetworkPassword", "SetFriendsOnly", "SetAutoInstallMods"
           )
 
           function ReadU16([byte[]]$Bytes, [int]$Offset) { [BitConverter]::ToUInt16($Bytes, $Offset) }
@@ -133,7 +133,7 @@ jobs:
               Write-Host "::error::missing exports: $($missing -join ' ')"
               exit 1
             }
-            Write-Host "all six exports present"
+            Write-Host "all seven exports present"
           } catch {
             Write-Host "::error::failed to verify t7patch.dll exports: $_"
             exit 1
@@ -172,7 +172,8 @@ jobs:
       - uses: actions/checkout@v7
 
       # First, ahead of any compiling: an RVA that drifted from tools/baseline_*.json is wrong
-      # for the one build kSupportedBuilds names, and no compiler will notice. An earlier
+      # for the builds patch/GameBuild.h supports (every RVA is a February 2026 RVA, shifted at
+      # runtime for later builds), and no compiler will notice. An earlier
       # version of this step predated the script and guessed its flag, which turned this job and
       # `release` red on every push; it now runs only the real read-only mode (exit 1 on drift).
       # -B: the checkout is not ours to litter with __pycache__.
@@ -248,14 +249,14 @@ jobs:
             | sed -n '/\[Ordinal\/Name Pointer\] Table/,/^$/p' \
             | sed -n 's/^[[:space:]]*\[[[:space:]]*[0-9]\{1,\}\][[:space:]]//p')"
           missing=""
-          for sym in EnableInjectorlessInstall zbr_run_gamemode_lui Unload SetPlayerName SetNetworkPassword SetFriendsOnly; do
+          for sym in EnableInjectorlessInstall zbr_run_gamemode_lui Unload SetPlayerName SetNetworkPassword SetFriendsOnly SetAutoInstallMods; do
             grep -qx "$sym" <<<"$exports" || missing="$missing $sym"
           done
           if [ -n "$missing" ]; then
             echo "::error::missing exports:$missing"
             exit 1
           fi
-          echo "all six exports present"
+          echo "all seven exports present"
 
   # dsound.dll has no MSVC project (see dsound_proxy.cpp's own remarks) - unlike t7patch.dll,
   # mingw IS its real build here, not a test-only stand-in, so this (mirroring dev/build's
@@ -534,12 +535,12 @@ jobs:
              It can still refuse to run after that point.
              No file at all means step 2 (or the filename in step 1) is the problem.
 
-          4. If a "T7Patch" message box appears listing TimeDateStamp, SizeOfImage and
-             EntryPoint, your copy of Black Ops III is a game build this version of
-             T7Patch does not support (usually because the game was updated). The patch
-             has refused to load and you are NOT protected. Nothing you can change in
-             these steps fixes that; it needs a T7Patch release for that build. Please
-             report the three values from the box exactly as shown.
+          4. If your copy of Black Ops III is a game build this version of T7Patch does
+             not support (usually because the game was updated), the patch refuses to
+             start WITHOUT any message box: the game runs normally but you are NOT
+             protected. Nothing you can change in these steps fixes that; it needs a
+             T7Patch release for that build. The T7Patch installer shows a warning with
+             the values to report when it detects an unsupported build.
 
           Settings live in t7patch.conf in the same folder, created on first run.
           TXT
