@@ -73,3 +73,7 @@ LeaveJustInCase/
 # root tools/ directory; that rule is dropped here because tools/ holds this repo's tracked
 # offset lint. Keep any local RE tooling outside tools/.
 stock-symbols/
+
+# Python bytecode from running tools/ (CI and the README use -B, but a bare run still writes it).
+__pycache__/
+*.pyc

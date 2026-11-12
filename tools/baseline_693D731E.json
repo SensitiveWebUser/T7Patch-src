@@ -1,0 +1,1308 @@
+{
+  "format": 1,
+  "comment": "Build-specific constants in patch/ for BlackOps3.exe 0x693D731E. Regenerate only as part of porting to a new build; see tools/README.md.",
+  "supported_builds": [
+    {
+      "time_date_stamp": "0x693D731E",
+      "size_of_image": "0x1D74B000",
+      "entry_point": "0x02BD40FC"
+    }
+  ],
+  "highest_patched_rva": "0x1D6692FA",
+  "gate_margin": 16,
+  "arxan_tables": {
+    "crc_patch_1": {
+      "count": 259,
+      "min": "0x21301F2",
+      "max": "0x1D66814D",
+      "patch": "patch_crc_1",
+      "patch_len": 6,
+      "sha256": "3052471eaa2f9cf4dfaf04e20c3c785f5d3a057ff04d6f0a3a89964ede129d87"
+    },
+    "crc_patch_2": {
+      "count": 259,
+      "min": "0x135AC42",
+      "max": "0x1D663ECF",
+      "patch": "patch_crc_2",
+      "patch_len": 8,
+      "sha256": "dd775100019f8328c9e5a06938fbe0659f7e9d19705a150ef58a2033c278ac76"
+    },
+    "crc_patch_3": {
+      "count": 847,
+      "min": "0x134181E",
+      "max": "0x1D6692FA",
+      "patch": "patch_crc_3",
+      "patch_len": 6,
+      "sha256": "497260109cdc7c2565c5a4ba38386fc1a7c335d8d15a52688a8839c15fe61052"
+    }
+  },
+  "symbols": {
+    "BG_Cache_GetEventStringNameForIndex": "0xA78A0",
+    "BG_Cache_GetLUIMenuDataForIndex": "0xA7990",
+    "BG_Cache_GetLUIMenuForIndex": "0xA7A00",
+    "BG_Cache_GetLocStringNameForIndex": "0xA7AB0",
+    "BG_Cache_GetScriptMenuNameForIndex": "0xA7DE0",
+    "CL_ConnectionlessCMD": "0x134CD70",
+    "CL_GetConfigString": "0x1321130",
+    "CL_StoreConfigString": "0x13667E0",
+    "CMD_MenuResponseCached_f": "0x195EFA0",
+    "CMD_MenuResponse_f": "0x195F100",
+    "COD_GetBuildTitle": "0x20E31C0",
+    "Com_SessionMode_GetModeName": "0x20EAD00",
+    "DW_LOBBY": "0x9B35878",
+    "Dvar_SetFromStringByName": "0x226B0A0",
+    "ExecLuaCMD": "0x1EF8A60",
+    "INT3_2_BO3": "0x1059",
+    "Info_ValueForKey": "0x227BDA0",
+    "LiveEntitlements_IsEntitlementActiveForController": "0x1E06110",
+    "LiveInventory_AreExtraSlotsPurchased": "0x1DFC580",
+    "LiveInventory_GetItemQuantity": "0x1DFCC60",
+    "LiveInventory_IsValid": "0x1DFDFE0",
+    "LiveInvites_AcceptInvite": "0x1E19B30",
+    "LiveInvites_JoinMessageAction": "0x1E72040",
+    "LiveInvites_SendJoinInfo": "0x1E724A0",
+    "LivePresence_Serialize": "0x1E85450",
+    "LiveSteam_InitServer": "0x1EA9C80",
+    "Live_Base_UserGetName": "0x1EA4960",
+    "Live_SystemInfo": "0x1E016C0",
+    "Live_UserGetName": "0x1EBB200",
+    "LobbyHost_IsHost": "0x1ECCDC0",
+    "LobbyMsgRW_PackageInt": "0x1EEA3E0",
+    "LobbyMsgRW_PackageUChar": "0x1EEA450",
+    "LobbyMsgRW_PackageUInt": "0x1EEA490",
+    "LobbyMsgRW_PrepReadMsg": "0x1EEB8D0",
+    "LobbyMsgRW_PrepWriteMsg": "0x1EEA560",
+    "LobbyMsgRW_PrintDebugMessage": "0x1EEA680",
+    "LobbyMsgRW_PrintMessage": "0x1EEA940",
+    "LobbyMsg_HandleIM": "0x1EEA130",
+    "LobbyTypes_GetMsgTypeName": "0x1EDFA60",
+    "LuaCrash1": "0x1C9F121",
+    "LuaCrash1Rip": "0x1C9F2CE",
+    "LuaCrash2": "0x221CEC3",
+    "LuaCrash3": "0x221C726",
+    "MSG_BeginReading": "0x20FC900",
+    "MSG_InitReadOnly": "0x20FCC10",
+    "MSG_ReadByte": "0x20FD050",
+    "MSG_ReadData": "0x20FD0B0",
+    "Memset": "0x2BC53B0",
+    "Mods_SubscribeUGC": "0x20CB0C0",
+    "OFF_s_runningUILevel": "0x1686E99E",
+    "PTR_CL_GetConfigString": "0x1321130",
+    "PTR_Cbuf_AddText": "0x20DFF50",
+    "PTR_Cmp_TokenizeStringInternal": "0x20E2A41",
+    "PTR_Com_ControllerIndex_GetLocalClientNum": "0x20E3700",
+    "PTR_Com_LocalClient_GetNetworkID": "0x20E3890",
+    "PTR_I_stricmp": "0x227CB20",
+    "PTR_LiveFriends_IsFriendByXUID": "0x1DECFD0",
+    "PTR_LobbyJoin_Reserve": "0x1EDBA00",
+    "PTR_LobbyMsgRW_PackageArrayStart": "0x1EEA260",
+    "PTR_LobbyMsgRW_PackageBool": "0x1EEA2E0",
+    "PTR_LobbyMsgRW_PackageChar": "0x1EEA300",
+    "PTR_LobbyMsgRW_PackageElement": "0x1EEA320",
+    "PTR_LobbyMsgRW_PackageFloat": "0x1EEA390",
+    "PTR_LobbyMsgRW_PackageGlob": "0x1EEA3B0",
+    "PTR_LobbyMsgRW_PackageInt": "0x1EEA3E0",
+    "PTR_LobbyMsgRW_PackageShort": "0x1EEA400",
+    "PTR_LobbyMsgRW_PackageString": "0x1EEA420",
+    "PTR_LobbyMsgRW_PackageUChar": "0x1EEA450",
+    "PTR_LobbyMsgRW_PackageUInt": "0x1EEA490",
+    "PTR_LobbyMsgRW_PackageUInt64": "0x1EEA470",
+    "PTR_LobbyMsgRW_PackageUShort": "0x1EEA4B0",
+    "PTR_LobbyMsgRW_PackageXuid": "0x1EEA4D0",
+    "PTR_LobbyMsgRW_PrepReadData": "0x1EEA150",
+    "PTR_LobbyMsgRW_PrepWriteMsg": "0x1EEA560",
+    "PTR_LobbyMsgTransport_SendToAdr": "0x1EEC740",
+    "PTR_LobbySession_GetClientByClientNum": "0x1EF3FB0",
+    "PTR_LobbySession_GetClientNetAdrByIndex": "0x1EBFCC0",
+    "PTR_LobbySession_GetControllingLobbySession": "0x1EBFDA0",
+    "PTR_LobbySession_GetSession": "0x1EC1650",
+    "PTR_MSG_InfoResponse": "0x1ED5B40",
+    "PTR_MSG_Init": "0x20FCB80",
+    "PTR_MSG_ReadByte": "0x20FD050",
+    "PTR_MSG_ReadData": "0x20FD0B0",
+    "PTR_MSG_WriteByte": "0x20FF3C0",
+    "PTR_MSG_WriteData": "0x20FF3E0",
+    "PTR_MSG_WriteShort": "0x211A2D0",
+    "PTR_MSG_WriteString": "0x20FFE20",
+    "PTR_MsgMutableClientInfo_Package": "0x1EC8400",
+    "PTR_NET_OutOfBandData": "0x211B200",
+    "PTR_NET_OutOfBandPrint": "0x211B310",
+    "PTR_Name1": "0x113A4970",
+    "PTR_Name2": "0x113A48F0",
+    "PTR_ProbeLobbyInfo": "0x1EDA510",
+    "PTR_UpdatePreloadIdleFN": "0x32A75A8",
+    "PTR_dwCommonAddrToNetadr": "0x143C380",
+    "PTR_dwInstantHandleLobbyMessage": "0x143A7A0",
+    "PTR_dwInstantSendMessage": "0x143A830",
+    "PTR_dwRegisterSecIDAndKey": "0x143E140",
+    "PTR_lobbymsgprints": "0x156CE8D0",
+    "PTR_saveLobbyMsgExceptAddy": "0x1EEBF74",
+    "ROP_RETN": "0x1048",
+    "SCRVM_Error": "0x12EA4E0",
+    "SCRVM_FS": "0x513DD30",
+    "SEH_ReplaceDirectiveInStringWithBinding": "0x221CE90",
+    "STEAMAPI_FRIENDS": "0x10B3DC20",
+    "STEAMAPI_INTERFACE": "0x10B3DC40",
+    "STEAMAPI_MATCHMAKING": "0x10B3DC30",
+    "STEAMAPI_NETWORKING": "0x10B3DC50",
+    "STEAMAPI_STEAMUSER": "0x10B3DC20",
+    "SV_Cmd_ArgvBuffer": "0x20E2FD0",
+    "Scr_AddString": "0x12E9A50",
+    "Scr_ExecEntThread": "0x1B20280",
+    "Scr_FreeThread": "0x12EAB70",
+    "Sys_Checksum": "0x211F430",
+    "Sys_ChecksumCopy": "0x211F500",
+    "Sys_GetTLS": "0x212B3D0",
+    "Sys_VerifyPacketChecksum": "0x211F5A0",
+    "UI_BrowserOpen": "0x1EA4E30",
+    "UI_DoModelStringReplacement": "0x1F27400",
+    "UI_Model_AllocateNode": "0x200CD00",
+    "UI_Model_CreateModelFromPath": "0x200CFC0",
+    "UI_Model_GetModelFromPath": "0x200D5B0",
+    "UI_Model_GetModelFromPath_0": "0x200CF00",
+    "UserHasLicenseForApp": "0x1EAAD60",
+    "dwInstantDispatchMessage": "0x143A620",
+    "flsomeWeirdCharacterIndex": "0x22C9650",
+    "pNameBuffer": "0x15E056C8",
+    "pUserData": "0x14F344B0",
+    "qmemcpy": "0x2BC4EB0",
+    "s_playerData_ptr": "0x3390190"
+  },
+  "sites": [
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1321130",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x134CD70",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x143A620",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x195EFA0",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x195F100",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x19646A7",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1964766",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1CA4C84",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1DFC580",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1DFCC60",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1DFDFE0",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1E016C0",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1E06110",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1E19B30",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1E72040",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1E724A0",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1E85450",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1EA4E30",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1EA9C80",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1EAAD60",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1EBB200",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1EDFA60",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1EEA3E0",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1EEA450",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1EEA490",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1EEA560",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1EEA680",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1EEA940",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1EEACF3",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1EEB8D0",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1EF8A60",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1F21EF8",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1F27400",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x200CD00",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x200CF00",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x200CFC0",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x200D5B0",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x20CB0C0",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x20E31C0",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x211F500",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x211F5A0",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x221CE90",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x227BDA0",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x22BC1CD",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x22BC1D2",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x22C9650",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x2BC4EB0",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0xA5A6810",
+      "count": 2
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x16293150",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1681BEB0",
+      "count": 2
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1681BF14",
+      "count": 2
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x1686E874",
+      "count": 1
+    },
+    {
+      "file": "patch/Hooks.cpp",
+      "rva": "0x17679580",
+      "count": 2
+    },
+    {
+      "file": "patch/Protection.cpp",
+      "rva": "0x131E350",
+      "count": 2
+    },
+    {
+      "file": "patch/Protection.cpp",
+      "rva": "0x1EA6010",
+      "count": 1
+    },
+    {
+      "file": "patch/Protection.cpp",
+      "rva": "0x20EAD00",
+      "count": 1
+    },
+    {
+      "file": "patch/Protection.cpp",
+      "rva": "0x22C965C",
+      "count": 1
+    },
+    {
+      "file": "patch/Protection.cpp",
+      "rva": "0x22C9676",
+      "count": 1
+    },
+    {
+      "file": "patch/Protection.cpp",
+      "rva": "0x22C9686",
+      "count": 2
+    },
+    {
+      "file": "patch/Protection.cpp",
+      "rva": "0xA0378B8",
+      "count": 1
+    },
+    {
+      "file": "patch/Protection.cpp",
+      "rva": "0x11250898",
+      "count": 1
+    },
+    {
+      "file": "patch/Protection.cpp",
+      "rva": "0x113A4A60",
+      "count": 1
+    },
+    {
+      "file": "patch/Protection.cpp",
+      "rva": "0x15E84638",
+      "count": 1
+    },
+    {
+      "file": "patch/Protection.cpp",
+      "rva": "0x1686ED20",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x0",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x133EC1",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x133EEB",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x133F12",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x133F31",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x133F42",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x464FEF",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x4651A2",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0xC15B80",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0xC15C50",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0xC18CF5",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x11D2580",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x11D2592",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x12EA450",
+      "count": 2
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x12EE4EC",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x12EE5E8",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x13591F3",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x13591FA",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x15E4B7A",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x15E4BA3",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x1A5F94B",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x1A5FA5E",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x1A5FB5E",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x1A5FBFD",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x1A5FE76",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x1A5FF86",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x1A6003D",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x1A602C7",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x1A604C4",
+      "count": 2
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x1A6054B",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x1E9E657",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x1E9E7E3",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x22328F6",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x22C4935",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x22C49FE",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x22C965C",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x22C9686",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x22D2F0D",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x22D389E",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x5124869",
+      "count": 1
+    },
+    {
+      "file": "patch/dllmain.cpp",
+      "rva": "0x51A3710",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1048",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1059",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0xA78A0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0xA7990",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0xA7A00",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0xA7AB0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0xA7DE0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x12E9A50",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x12EA4E0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x12EAB70",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1321130",
+      "count": 2
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x134CD70",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x13667E0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x143A620",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x143A7A0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x143A830",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x143C380",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x143E140",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x195EFA0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x195F100",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1B20280",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1C9F121",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1C9F2CE",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1DECFD0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1DFC580",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1DFCC60",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1DFDFE0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1E016C0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1E06110",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1E19B30",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1E72040",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1E724A0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1E85450",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EA4960",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EA4E30",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EA9C80",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EAAD60",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EBB200",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EBFCC0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EBFDA0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EC1650",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EC8400",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1ECCDC0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1ED5B40",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EDA510",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EDBA00",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EDFA60",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EEA130",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EEA150",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EEA260",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EEA2E0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EEA300",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EEA320",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EEA390",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EEA3B0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EEA3E0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EEA400",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EEA420",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EEA450",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EEA470",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EEA490",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EEA4B0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EEA4D0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EEA560",
+      "count": 2
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EEA680",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EEA940",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EEB8D0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EEBF74",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EEC740",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EF3FB0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1EF8A60",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1F27400",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x200CD00",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x200CF00",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x200CFC0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x200D5B0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x20CB0C0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x20DFF50",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x20E2A41",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x20E2FD0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x20E31C0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x20E3700",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x20E3890",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x20EAD00",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x20FC900",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x20FCB80",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x20FCC10",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x20FD050",
+      "count": 2
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x20FD0B0",
+      "count": 2
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x20FF3C0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x20FF3E0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x20FFE20",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x211A2D0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x211B200",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x211B310",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x211F430",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x211F500",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x211F5A0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x212B3D0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x221C726",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x221CE90",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x221CEC3",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x226B0A0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x227BDA0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x227CB20",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x22C9650",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x2BC4EB0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x2BC53B0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x32A75A8",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x3390190",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x513DD30",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x9B35878",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x10B3DC20",
+      "count": 2
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x10B3DC30",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x10B3DC40",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x10B3DC50",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x113A48F0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x113A4970",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x14F344B0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x156CE8D0",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x15E056C8",
+      "count": 1
+    },
+    {
+      "file": "patch/offsets.h",
+      "rva": "0x1686E99E",
+      "count": 1
+    }
+  ]
+}
