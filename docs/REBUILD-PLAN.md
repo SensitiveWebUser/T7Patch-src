@@ -1,10 +1,60 @@
 # T7Patch rebuild: working plan
 
+## Status update, 2026-11-12: upstream already did the port
+
+**Read this first. Much of the plan below is superseded.** It is kept as a historical record.
+
+- **The game build is supported upstream.** Upstream (Scroptss/T7Patch-src `main`, "Patch 3.09")
+  supports both the February 2026 and September 2026 builds. `patch/GameBuild.h` detects them by
+  TimeDateStamp plus SizeOfImage (retail or IDA-dump size). Every address is written as a February
+  RVA and shifted by a constant `0x6C0` inside one code range on the September build. Upstream
+  says it confirmed that mapping against dumps. Arxan checksum sites are found at runtime by byte
+  pattern (exactly 259/259/847 matches required) instead of a 1365-entry RVA table.
+- **The reported values were right.** TimeDateStamp `0x6A7B6355`, SizeOfImage `0x1D75BC00`,
+  EntryPoint `0x02BD334C` were correct as reported. This plan's claim that `0x1D75BC00` was
+  "not page-aligned, therefore OCR-misread" was **wrong**: a retail exe's SizeOfImage keeps its
+  0x200 alignment, and only IDA's reconstructed dumps round up to `0x1D75C000`. Every
+  "OCR / unconfirmed triple / do not name anything after 0x6A7B6355" instruction below is void.
+- **The branch now sits on upstream.** The user reset the fork's `main` to upstream's rewritten
+  history. `rebuild/foundation-v2` = upstream `main` + the `patch/` move (no content changes) +
+  this repo's non-DLL work (dsound proxy, `dev/build`, CI, injector, `tools/`, docs).
+- **The hardening is archived, not merged.** Commit `46424cd` (the `kSupportedBuilds` gate and
+  MessageBox, `debuglog` trace log, password trimming / `ZBR_HAS_PASSWORD`, `InspectorScope`, the
+  `CheckPendingInfoRequests` bounds fix, the `g_patched` latch, the Protection `ZwContinue`
+  resolution) is **not in this tree**. It is preserved on local branch `archive/hardening-46424cd`;
+  the pre-rebase side branch is `archive/rebuild-foundation-v1`. AGENTS.md marks which of its
+  sections describe that archived code.
+
+**Superseded:** §0 interim advice (the build is supported), all of §2, Phase 3 evidence capture,
+Phase 4 minimal port and the porting half of Phase 5 (all done upstream), Phase 6 GameProfile
+refactor (upstream chose the delta + pattern-scan design instead), and the parts of §3, §6 and the
+cleanup tables that describe `kSupportedBuilds`, the trace log or the hardened wire format.
+
+**Still relevant:**
+1. Injector work (Phase 7, `injector/PARITY-TODO.md`). Its game-build check and its `t7patch.conf`
+   writer must mirror upstream: `GameBuild.h`, and `loadfrom()` with `autoinstallmods` and no
+   `debuglog`.
+2. Docs (Phase 1, retargeted to upstream).
+3. `tools/` lint and CI (Phase 2), retargeted to upstream's `GameBuild.h` / pattern-scan layout.
+4. Live verification on Windows and Proton (Phase 5 Tier 1–4 checklists) of the DLL this repo
+   builds.
+5. **Optional:** re-porting selected hardening from `archive/hardening-46424cd` onto upstream's
+   code. This is a separate, reviewed effort under AGENTS.md §0. The highest-value candidate is the
+   `CheckPendingInfoRequests` bounds fix, because the crash primitive it closes is live in the
+   current tree (AGENTS.md §8).
+
+---
+
+## Original plan (2026-11-12, before upstream was pulled)
+
 Status as of 2026-11-12, branch `injector-modernization`. **This plan is read-only output.** Nothing below has been run: no files were changed, nothing was staged or committed. Every Windows or in-game claim is unverified, because no BlackOps3.exe of either build is available in this environment.
 
 ---
 
 ## 0. Interim: what to do right now, before any code changes
+
+> **Superseded (2026-11-12):** upstream supports the September 2026 build; see the status update at the top.
+
 
 - **The game is currently running unpatched.** On the new build the gate refuses, and `RunPatching` returns before it installs hooks, Arxan patches, `Protection::install` or the config watcher. That means there is no packet filtering, no network password and no friends-only filter. The protection is gone; it is not partly working.
 - Until a verified build ships:
@@ -69,6 +119,9 @@ Status as of 2026-11-12, branch `injector-modernization`. **This plan is read-on
 ---
 
 ## 2. Why the game says "unsupported build", and what fixes it
+
+> **Superseded (2026-11-12):** the three reported values were correct (the OCR/page-alignment reasoning below is wrong), and upstream ported to the new build with a constant RVA shift plus runtime Arxan pattern scanning; see the status update at the top.
+
 
 ### What happened
 
@@ -285,6 +338,9 @@ Phases 0–2 run on Linux and can proceed while the user works through Phase 3 o
 
 ### Phase 3: Evidence capture and update assessment (Windows, user-run)
 
+> **Superseded (2026-11-12):** done upstream.
+
+
 1. **Exact triple** from the trace (`debuglog=1`) or from the exe header (PowerShell / `objdump -p`). This confirms or corrects all three OCR'd values.
 2. Copy the new exe and steam_api64.dll into a local `evidence/` with SHA-256. Never commit them.
 3. **Old build.** Download the full previous depot set into a **separate install directory**, never over the live Steam install, which auto-update or validation would overwrite. Check that its triple matches exactly.
@@ -307,6 +363,9 @@ Phases 0–2 run on Linux and can proceed while the user works through Phase 3 o
 - **Go/no-go:** if the old build cannot be recovered at all, CRC regeneration has no reference. Then either use upstream's binary tables or hand-derive the guard templates at much lower confidence. The user decides explicitly.
 
 ### Phase 4: Minimal port to the new build (keep the existing literal structure)
+
+> **Superseded (2026-11-12):** done upstream (`patch/GameBuild.h`).
+
 
 Substitute new values into the existing `Arxan.h`, `offsets.h` and inline literals. Do not restructure anything.
 
@@ -331,6 +390,9 @@ Substitute new values into the existing `Arxan.h`, `offsets.h` and inline litera
 
 ### Phase 5: Live verification and release
 
+> **Partly superseded (2026-11-12):** porting is done upstream; the Tier 1–4 live-test checklists still apply to the DLL this repo builds. The version question now starts from upstream's "Patch 3.09".
+
+
 1. **Choose the version first.** HEAD already says "Patch 3.05" (`framework.h:268`, `T7Patch.rc:9-11`), and AGENTS §5 says this fork is wire-incompatible with released upstream 3.05. That is already a collision. Upstream will probably call its own release for this game update "3.06". Pick a scheme that cannot collide (a fork suffix or a separate major), and tie it to the update-check repo decision. `updates.js` currently compares against Scroptss/T7Patch tags. Apply the version to `framework.h`, `T7Patch.rc`, `lib.rs` CURRENT_VERSION, `updates.js`, `tauri.conf.json` and `Cargo.toml` together.
 2. Prerequisites: action-gh-release re-pinned; a green CI dll-msvc build with the PDB as an artifact. No tag yet.
 3. **Run the first live sessions on a secondary Steam account**, in case the update added anti-cheat that reacts to code patching.
@@ -351,6 +413,9 @@ Substitute new values into the existing `Arxan.h`, `offsets.h` and inline litera
 - **Needs from user:** two machines or accounts, Proton, the go/no-go decision and permission to tag.
 
 ### Phase 6: Centralise and add the safety net (after a live-verified baseline exists)
+
+> **Superseded (2026-11-12):** upstream chose a different design (delta mapping + pattern scan); a GameProfile refactor of upstream's code is not planned.
+
 
 1. Generate `build_<ts>.gen.h` profiles for every supported build from the lint baseline and the stable-byte dumps.
 2. Replace literals with profile fields **one file per commit**, with explicit `raw_`/`orig_` binding.
@@ -416,6 +481,9 @@ Substitute new values into the existing `Arxan.h`, `offsets.h` and inline litera
 ## 6. Must preserve / explicitly not doing
 
 ### Must preserve exactly (AGENTS §0, §3–§12, and the wire contract)
+
+> **Note (2026-11-12):** items 1–3 and 6–9 below describe the archived hardening (`46424cd`), not the current upstream tree (e.g. upstream predicates on `ZBR_PREFIX_BYTE`, parses `isfriendsonly` as an integer, has no `debuglog`, exports seven functions). They are the contract for a hardening re-port, not for the current tree.
+
 
 1. **Password hash:**
    - FNV-1a-64 (offset 14695981039346656037, prime 1099511628211);
