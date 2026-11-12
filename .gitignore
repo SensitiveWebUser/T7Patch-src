@@ -1,5 +1,75 @@
-/.vs
-/T7Patch
-/x64
+# Build output
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+!patch/minhook/lib/*.lib
+!patch/detours/*.lib
+
+# Visual Studio (patch/T7Patch/ is an intermediate dir VS creates beside the project)
+.vs/
+patch/T7Patch/
+*.user
+
+# JetBrains IDEs (Rider, etc.)
+.idea/
+
+# Local build/staging output
+artifact/
+packages/
+
+# dev/build itself (the Docker-based local build script) and dev/README.md ARE tracked, so a
+# Docker-based local build works out of the box for anyone on this branch. What stays excluded
+# is dev/out/, the one directory a build writes to: every file in it (both DLLs and the injector
+# exes) is produced from source in this repo on demand, so none of it belongs in git history.
+dev/out/
+
+# VS resource-editor binary, created once T7Patch.rc is opened in the designer
+*.aps
+
+# Local working notes — forensic findings from working on this codebase, deliberately
+# never committed
+NOTES.md
+
+# Local AI-agent reference docs, not tracked upstream. AGENTS.md is the authoritative
+# engineering reference for the C++ patch, generated from NOTES.md; CLAUDE.md is the working
+# guide for Claude Code in this repo.
+#
+# Both are deliberately untracked. The consequence worth knowing: a fresh clone gets NEITHER, so
+# anything a contributor genuinely must know to build or ship this project has to live in
+# dev/README.md or injector/README.md instead - those two are the only tracked build docs.
+AGENTS.md
+CLAUDE.md
+
+# injector/ build output and fetched dependencies. The DLL payload under injector/assets/ is
+# already covered by the *.dll rule above: it is produced by ./dev/build and embedded with
+# include_bytes!, never committed.
+injector/target/
+injector/ui/node_modules/
+# Vite output (`bun run build`), regenerated on every build.
+injector/ui/dist/
+# tauri-build regenerates these from capabilities/ and the plugin set on every build.
+injector/src-tauri/gen/
+
+# Parked implementation, kept on disk only. The .NET injector was never committed (it lived in
+# the index alone), so it is moved here rather than deleted while the Tauri port takes over.
+# Ignored so it can never be committed by accident, and so a `git add -A` after the switch does
+# not resurrect it into the tree.
+LeaveJustInCase/
+
+# Claude Code's local state and any locally-installed agent skills. Nothing here is part of the
+# project: it currently holds a 1205-line frontend-design skill that has no connection to a C++
+# game patch, and `git add -A` would commit it. Whitelist a specific skill directory here if one
+# is ever genuinely meant to be shared with contributors.
+.claude/
+
+# Upstream's local reverse-engineering inputs (stock game symbols). Upstream also ignored a
+# root tools/ directory; that rule is dropped here because tools/ holds this repo's tracked
+# offset lint. Keep any local RE tooling outside tools/.
 stock-symbols/
-tools/
