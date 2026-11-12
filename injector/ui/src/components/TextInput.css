@@ -1,0 +1,22 @@
+.input {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--control-h);
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  transition: border-color var(--dur) ease;
+}
+.input::placeholder { color: var(--text-3); }
+.input:hover:not(:disabled):not([readonly]) { border-color: var(--text-3); }
+.input:disabled { background: var(--surface-2); color: var(--text-3); }
+/* Read-only fields here are values to copy (game path, launch option), not disabled inputs: they
+   stay selectable and keyboard-reachable, and only the fill says "not yours to edit". */
+.input[readonly] { background: var(--surface-2); color: var(--text-2); }
+.input.is-invalid { border-color: var(--danger); }
+.input-mono { font-family: var(--font-mono); font-size: var(--fs-xs); }
+
+/* Input plus trailing buttons on one line. */
+.input-group { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
+.input-group .input { flex: 1; }

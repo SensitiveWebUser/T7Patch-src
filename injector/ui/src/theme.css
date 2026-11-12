@@ -1,0 +1,175 @@
+/* Design tokens + frame. Every colour in this app is defined here and nowhere else: a hex literal
+   in a component stylesheet is a colour that cannot follow the theme, which is how a "light mode
+   only" bug ships. Components reference tokens exclusively.
+
+   No webfont on purpose. The CSP is `default-src 'self'` with no font-src, so an @import from
+   Google would be blocked and silently fall back - the platform stack is both the correct look
+   for a desktop utility and the only one that can actually load. */
+
+/* Visually hidden but announced. Used by StatusLog and Button for live
+   regions and state text; without it those strings render on screen. clip-path rather than the
+   deprecated clip, and white-space:nowrap because some screen readers otherwise announce one
+   character per line. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+:root {
+  color-scheme: light dark;
+
+  --font-ui: system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI", Ubuntu, Cantarell,
+    "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, "DejaVu Sans Mono",
+    monospace;
+  --fs-xs: 11.5px;
+  --fs-sm: 13px;
+  --fs-md: 14px;
+  --fs-lg: 17px;
+  --lh: 1.45;
+
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 9px;
+  --control-h: 28px;
+  --control-h-lg: 34px;
+  --dur: 110ms;
+
+  /* TRUE NEUTRALS. Every grey here has R=G=B - no blue tint anywhere. The previous palette
+     was blue-shifted throughout (#f4f5f7, #dde0e5, #555b65) with a #2f5fd0 accent, which is the
+     default "product UI" look and reads as generic. Charcoal is the point.
+
+     Colour appears ONLY where it carries meaning: red for a destructive action, green for
+     installed. There is no decorative accent, so nothing has to be chosen arbitrarily and
+     nothing competes with the two states that matter. */
+  --bg: #f6f6f6;
+  --surface: #ffffff;
+  --surface-2: #efefef;
+  --surface-3: #e4e4e4;
+  --line: #dcdcdc;
+  --line-strong: #bdbdbd;
+  --text: #1b1b1b;
+  --text-2: #5a5a5a;
+  --text-3: #8a8a8a;
+
+  /* The primary action is charcoal, not a brand colour. A filled near-black button is the
+     strongest thing on a neutral page without introducing a hue that means nothing. */
+  --accent: #262626;
+  --accent-hi: #101010;
+  --accent-ink: #ffffff;
+  --accent-text: #1b1b1b;
+  /* Focus is charcoal too, made visible by an offset ring rather than by hue. */
+  --focus: #1b1b1b;
+
+  --info-soft: #f0f0f0;
+  --info-line: #d4d4d4;
+  --info-text: #3d3d3d;
+  --ok-soft: #eaf3ec;
+  --ok-line: #bcd7c3;
+  --ok-text: #2c6b41;
+  --warn-soft: #f7f1e4;
+  --warn-line: #ddceac;
+  --warn-text: #6b5312;
+  --danger: #a33028;
+  --danger-hi: #8a2822;
+  --danger-ink: #ffffff;
+  --danger-soft: #f7ebea;
+  --danger-line: #e0bcb8;
+  --danger-text: #8a2822;
+
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.06);
+--shadow-2: 0 4px 14px rgb(16 20 28 / 0.12);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Charcoal, not navy. Off-black rather than #000 so depth survives (skill 8.B). */
+    --bg: #141414;
+    --surface: #1c1c1c;
+    --surface-2: #242424;
+    --surface-3: #2e2e2e;
+    --line: #2c2c2c;
+    --line-strong: #454545;
+    --text: #ededed;
+    --text-2: #a8a8a8;
+    --text-3: #7a7a7a;
+
+    /* Inverted in dark: the primary action is a light fill on charcoal, the same idea as a
+       charcoal fill on light. Still no hue. */
+    --accent: #ededed;
+    --accent-hi: #ffffff;
+    --accent-ink: #141414;
+    --accent-text: #ededed;
+    --focus: #ededed;
+
+    --info-soft: #202020;
+    --info-line: #383838;
+    --info-text: #b8b8b8;
+    --ok-soft: #16291f;
+    --ok-line: #2c5138;
+    --ok-text: #79d3a1;
+    --warn-soft: #2a2214;
+    --warn-line: #55411c;
+    --warn-text: #e5b86b;
+    --danger: #c9453e;
+    --danger-hi: #d9564f;
+    --danger-ink: #ffffff;
+    --danger-soft: #2c1a19;
+    --danger-line: #5a2f2c;
+    --danger-text: #f1a09a;
+
+    --shadow-1: 0 1px 2px rgb(0 0 0 / 0.35);
+    --shadow-2: 0 4px 14px rgb(0 0 0 / 0.45);
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  line-height: var(--lh);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Inheriting the UI font is what keeps the whole app on one type scale; without it every control
+   falls back to the engine's 13.33px Arial and the layout drifts per platform. */
+button, input, select, textarea { font: inherit; color: inherit; }
+
+/* The old stylesheet had no :focus rule of any kind, so keyboard users navigated an invisible
+   cursor. :focus-visible rather than :focus - a mouse click on a button should not leave a ring. */
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+::selection { background: var(--accent); color: var(--accent-ink); }
+:root { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 1ms !important; animation-duration: 1ms !important; }
+}
+
+/* Frame. Fixed height, never scrolls; only .app-main does. REFACTOR-PLAN.md asks for both tab
+   panels to stay mounted and be toggled with `hidden`, which only holds if the frame owns the
+   height rather than growing with whichever panel is taller. */
+.app { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+.row { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
+.spacer { flex: 1; }

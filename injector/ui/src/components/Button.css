@@ -1,0 +1,51 @@
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  min-height: var(--control-h);
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--dur) ease, border-color var(--dur) ease, color var(--dur) ease;
+}
+.btn:hover:not(:disabled) { background: var(--surface-2); }
+.btn:active:not(:disabled) { background: var(--surface-3); }
+.btn:disabled { opacity: 0.5; cursor: default; }
+
+.btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn-primary:hover:not(:disabled),
+.btn-primary:active:not(:disabled) { background: var(--accent-hi); border-color: var(--accent-hi); }
+
+.btn-danger { background: var(--danger); border-color: var(--danger); color: var(--danger-ink); }
+.btn-danger:hover:not(:disabled),
+.btn-danger:active:not(:disabled) { background: var(--danger-hi); border-color: var(--danger-hi); }
+
+/* Borderless until touched. For repeated inline affordances (Show / Copy / Generate) where a full
+   row of outlined buttons reads louder than the field it belongs to. */
+.btn-ghost { background: none; border-color: transparent; color: var(--text-2); }
+.btn-ghost:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+.btn-ghost:active:not(:disabled) { background: var(--surface-3); }
+
+.btn-lg { min-height: var(--control-h-lg); padding: 0 var(--sp-4); font-size: var(--fs-md); }
+.btn-sm { min-height: 24px; padding: 0 var(--sp-2); font-size: var(--fs-xs); }
+.btn-block { width: 100%; }
+
+/* The spinner Button renders while loading. Without these rules the markup was an empty span
+   before the label, which .btn's gap turned into a phantom 8px shift and no visible spinner.
+   theme.css's prefers-reduced-motion block already neutralises the animation. */
+.btn-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: btn-spin 0.7s linear infinite;
+}
+
+@keyframes btn-spin { to { transform: rotate(360deg); } }

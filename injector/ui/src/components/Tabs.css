@@ -1,0 +1,56 @@
+.tabs {
+  flex: none;
+  display: flex;
+  gap: var(--sp-1);
+  padding: 0 var(--sp-4);
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.tab {
+  appearance: none;
+  margin-bottom: -1px;
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  background: none;
+  font-weight: 500;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.tab:hover { background: var(--surface-2); color: var(--text); }
+/* Selection is aria-selected, never :disabled. The predecessor marked the active tab `disabled`
+   (App.jsx:228), which took it out of the tab order and announced it as unavailable - the exact
+   defect REFACTOR-PLAN.md calls out. There is deliberately no :disabled style here to fall back on. */
+.tab[aria-selected="true"] { color: var(--accent-text); border-bottom-color: var(--accent); }
+.tab:focus-visible { outline-offset: -3px; }
+
+/* Panels stay mounted and are toggled with `hidden`; any display value set here would beat the
+   UA's [hidden] rule and show both at once. */
+.tabpanel { display: flex; flex-direction: column; gap: var(--sp-3); }
+.tabpanel[hidden] { display: none; }
+
+/* The frame delegates layout here: Tabs is the flex child that grows, and the PANEL is the one
+   element that scrolls. min-height:0 on both is what actually allows the panel to shrink inside a
+   flex column - without it the content forces the frame taller and the whole window scrolls,
+   which is exactly what "the frame never scrolls, only the content pane does" rules out. */
+.tabs-root {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.tabpanel {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-4);
+}
+
+/* aria-disabled, never the native attribute - a natively disabled tab leaves the tab order and is
+   announced as unavailable, which is the defect this whole component exists to fix. */
+.tab.is-disabled {
+  opacity: 0.5;
+  cursor: default;
+}

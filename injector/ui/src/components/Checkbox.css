@@ -1,0 +1,16 @@
+/* accent-color instead of a hand-drawn box: the native control is already correct in both themes,
+   at every platform's own size, and is the one widget screen readers never mis-announce. */
+.check { display: flex; align-items: flex-start; gap: var(--sp-2); min-width: 0; cursor: pointer; }
+.check input[type="checkbox"] {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin: 3px 0 0;
+  accent-color: var(--accent);
+  cursor: inherit;
+}
+.check-body { display: grid; gap: 1px; min-width: 0; }
+.check-hint { margin: 0; font-size: var(--fs-xs); color: var(--text-3); }
+.check.is-disabled { color: var(--text-3); cursor: default; }
+
+.check-label { font-weight: 500; }

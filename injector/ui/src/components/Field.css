@@ -1,0 +1,15 @@
+/* Label above control by default; .field-inline puts it beside, for dense settings rows. */
+.field { display: grid; gap: var(--sp-1); min-width: 0; }
+.field-label { font-weight: 500; color: var(--text-2); }
+.field-hint { margin: 0; font-size: var(--fs-xs); color: var(--text-3); }
+.field-error { margin: 0; font-size: var(--fs-xs); color: var(--danger-text); }
+
+.field-inline {
+  grid-template-columns: minmax(0, 9.5rem) minmax(0, 1fr);
+  align-items: center;
+  column-gap: var(--sp-3);
+}
+.field-inline .field-hint,
+.field-inline .field-error { grid-column: 2; }
+
+.field-required { color: var(--danger-text); margin-left: 2px; }
