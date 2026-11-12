@@ -76,6 +76,15 @@ export default {
   'state.notInstalled': 'T7Patch is not installed in this folder yet.',
   'state.partial': 'Half installed: {0} is here but {1} is not, so the patch will not load. Reinstall to fix it.',
 
+  // --- Game build (InstallState.game_build) ---------------------------------------------------
+  // Read from BlackOps3.exe's header on disk. Whether that equals what the DLL sees in memory is
+  // unverified for this Arxan-packed exe, so the wording says what the patch WILL do on a build
+  // it does not know, and never forbids installing: the check is the DLL's, not this tool's.
+  'build.unsupportedBadge': 'This game build is not supported yet.',
+  'build.unsupportedTitle': 'T7Patch does not support this game build yet; the patch will refuse to load.',
+  'build.unsupportedBody': 'Black Ops III has probably been updated. You can still install, but at startup the game will show a T7Patch message and then run without its protection until a T7Patch release supports this build. If you report it, include these values:',
+  'build.supported': 'This game build is supported.',
+
   // --- Onboarding strip ---------------------------------------------------------------------
   'onboard.locateNotFound': "Couldn't find it automatically - browse for the folder containing BlackOps3.exe.",
   'onboard.installReady': 'Click Next to write your settings and install T7Patch.',
@@ -140,6 +149,11 @@ export default {
 
   'wizard.intro': 'Three things have to be true before the patch loads with the game. Anything already done is ticked - leave it alone.',
   'wizard.introDone': "Everything is in place. Nothing here needs doing again - it's kept so you can check or change it.",
+  // Linux only. The three probed steps cannot cover the Steam launch option, so neither sentence
+  // may count "three things" or say "everything" there.
+  'wizard.introLaunchOption': 'Three things have to be true in the game folder, and on Linux the game also needs a Steam launch option. Anything already done is ticked - leave it alone.',
+  'wizard.introDoneUnsupported': 'The game folder is set up, but this game build is not supported yet - see below.',
+  'wizard.introDoneLaunchOption': 'The game folder is set up. The last step is the Steam launch option, which this tool cannot check for you.',
 
   'wizard.stepFolder': 'Point at the game folder',
   'wizard.stepSettings': 'Save your settings',
@@ -157,6 +171,7 @@ export default {
   'wizard.installDone': 'dsound.dll and t7patch.dll are both in place.',
   'wizard.installTodo': 'Copies dsound.dll and t7patch.dll into the game folder. Nothing outside that folder is touched.',
   'wizard.playBlocked': 'Finish the steps above and this becomes available.',
+  'wizard.playNeedsLaunchOption': 'The files are in place. On Linux the patch still needs the Steam launch option below.',
 
   // --- Basic page ---------------------------------------------------------------------------
   // Moved off Advanced. The wording is new because "Auto-launch on startup" never said whose
@@ -168,9 +183,6 @@ export default {
   'advanced.runSetup': 'Setup',
   'advanced.runSetupHint': 'Reopens the guided setup. It re-checks the folder, so it will not offer you anything that is already done.',
   'advanced.runSetupButton': 'Run setup',
-
-  'log.settingsSaved': 'Settings saved.',
-  'wizard.playNeedsLaunchOption': 'The files are in place. On Linux the patch still needs the Steam launch option below.',
 
   // STAGED, not dead: live injection has a working Rust backend and no UI yet
   // (PARITY-TODO.md). These are the predecessor's wording, kept so the feature does not have
@@ -225,6 +237,8 @@ export default {
   'log.launching': 'Launching the game via Steam...',
   'log.launchFailed': "Couldn't launch the game: {0}. Is Steam installed?",
   'log.passwordCopied': 'Password copied.',
+  'log.settingsSaved': 'Settings saved.',
+  'log.buildReportCopied': 'Game build details copied.',
 
   // The foreign-dsound case. New in this implementation - the predecessor overwrote a
   // pre-existing dsound.dll without noticing, which is the defect this wording exists to report.

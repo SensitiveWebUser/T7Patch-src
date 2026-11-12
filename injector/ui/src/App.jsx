@@ -13,13 +13,14 @@ import TextInput from './components/TextInput.jsx'
 import SecretInput from './components/SecretInput.jsx'
 import Checkbox from './components/Checkbox.jsx'
 import CopyButton from './components/CopyButton.jsx'
+import BuildNotice from './components/BuildNotice.jsx'
 import StatusLog from './components/StatusLog.jsx'
 import Wizard from './Wizard.jsx'
 import './app.css'
 
 setClipboardWriter({ writeText: pluginWriteText })
 
-const NO_STATE = { dsound_installed: false, patch_installed: false, conf_exists: false, is_game_dir: false, foreign_dsound: false }
+const NO_STATE = { dsound_installed: false, patch_installed: false, conf_exists: false, is_game_dir: false, foreign_dsound: false, game_build: null }
 const DEFAULT_CONFIG = {
   playername: 'Unknown Soldier', networkpassword: '', isfriendsonly: true, debuglog: false,
   toolautolaunchgame: false, toolcheckforupdatesonlaunch: true, toollastseenupstreamtag: '',
@@ -38,7 +39,7 @@ const PROTECTION_LABEL = {
 /**
  * The one thing this window is for: is the game protected, and if not, what fixes it.
  *
- * Six rows, tested top to bottom. They are exhaustive and mutually exclusive, so the last `return`
+ * Seven rows, tested top to bottom. They are exhaustive and mutually exclusive, so the last `return`
  * is unreachable - it is there because an unreachable branch that guesses GREEN would be a lie
  * about protection, and one that guesses "not installed" is merely wrong about the folder.
  *
@@ -56,10 +57,18 @@ const PROTECTION_LABEL = {
  * install_hijack reports not_a_game_dir and installs anyway, on purpose. Red would claim we know
  * it cannot work; all we know is that we cannot see the exe.
  *
- * What green does NOT claim: that the hooks are live. Two things gate that and neither is
- * probeable from the folder - the WINEDLLOVERRIDES launch option on Proton (which is why it is on
- * Advanced) and PatchChecksumComparisons_Precomputed() refusing an unrecognised BlackOps3.exe.
- * Green means the folder is right.
+ * `game_build.supported === false` demotes a complete install to PARTIAL, never red, and only
+ * once every file row has passed - a missing file is the more actionable fact. Arxan.cpp's
+ * VerifyGameBuild() returns before a single hook is installed on a build outside kSupportedBuilds,
+ * so green there would be the one claim this badge exists not to make. Not red, because the triple
+ * comes from the header ON DISK and nobody has verified that it equals what the DLL reads in
+ * memory from this Arxan-packed exe; partial is "probably will not work", not "cannot work".
+ * Strictly `=== false`: null means the header could not be read, and a badge that guessed either
+ * way from that would be inventing a fact.
+ *
+ * What green does NOT claim: that the hooks are live. The WINEDLLOVERRIDES launch option on Proton
+ * still gates that and is not probeable from the folder, which is why it is on Advanced. Green
+ * means the folder is right.
  *
  * `action` is which step of the Setup tab resolves the row, not a fourth piece of prose.
  */
@@ -81,8 +90,12 @@ function protectionOf(dir, s) {
     return { level: 'partial', text: t('protection.foreignBlocked'), hint: t('protection.actionMoveAside'), action: 'install' }
   }
   if (!s.dsound_installed || !s.patch_installed) {
-    // Exactly one is missing by here: rows 1-2 took the neither case, and both-present falls to 6.
+    // Exactly one is missing by here: rows 1-2 took the neither case, and both-present falls to 6-7.
     return { level: 'partial', text: t('protection.halfInstalled', s.dsound_installed ? 't7patch.dll' : 'dsound.dll'), hint: t('protection.actionReinstall'), action: 'install' }
+  }
+  if (s.game_build?.supported === false) {
+    // action 'none': no step of the Setup tab fixes this. Only a T7Patch release does.
+    return { level: 'partial', text: t('build.unsupportedBadge'), hint: '', action: 'none' }
   }
   if (s.is_game_dir && s.dsound_installed && s.patch_installed) {
     return { level: 'full', text: t('protection.fullDetail'), hint: '', action: 'launch' }
@@ -156,6 +169,17 @@ export default function App() {
   const log = useCallback((text) => {
     setLines((prev) => [...prev, formatLogLine(text)].slice(-500))
   }, [])
+
+  // For CopyButton's onCopy: logs the outcome AND returns it. The return is the contract - the
+  // button branches on it - and dropping it made every copy that went through here show "Copied",
+  // including the ones the status log, one line below, was reporting as failed.
+  const copyAndLog = (okKey) => async (value) => {
+    const ok = await copyText(value)
+    log(ok ? t(okKey) : t('action.copyFailed'))
+    return ok
+  }
+  const copyPassword = copyAndLog('log.passwordCopied')
+  const copyBuildReport = copyAndLog('log.buildReportCopied')
 
   // Everything the UI says about installation comes from probing the folder, never from what an
   // action believed it did. The predecessor's wizard printed "T7Patch is installed" as a literal
@@ -318,7 +342,8 @@ export default function App() {
   // otherwise resolve it is gone: dismissed setup plus something still wrong. Everything it does
   // is bring the Setup tab back, so there is exactly one place in this window where installing,
   // browsing and configuring happen as a guided flow.
-  const canReopen = probed && !showSetup && prot.level !== 'full'
+  // Not for the unsupported-build row: reopening Setup would offer three ticks and nothing to do.
+  const canReopen = probed && !showSetup && prot.level !== 'full' && prot.action !== 'none'
 
   return (
     <div className="app">
@@ -345,13 +370,17 @@ export default function App() {
                 onSaveSettings={saveSettings}
                 onInstall={async () => { setSetup('open'); await install() }}
                 onLaunch={launch}
-                onCopyPassword={async (v) => log(await copyText(v) ? t('log.passwordCopied') : t('action.copyFailed'))}
+                onCopyPassword={copyPassword}
+                onCopyBuildReport={copyBuildReport}
                 onDismiss={dismissSetup}
               />
             </Tab>
           )}
 
           <Tab id="settings" label={t('tab.basic')} panelClassName="pane">
+            {/* Top of the pane the user lands on, not tucked into Advanced: it decides whether
+                anything below it does anything. Renders nothing unless the build is unsupported. */}
+            <BuildNotice build={state.game_build} onCopy={copyBuildReport} />
             <Field label={t('basic.playerName')}>
               <TextInput value={cfg.playername} onValueChange={(v) => edit({ playername: v })} />
             </Field>
@@ -360,7 +389,7 @@ export default function App() {
                 value={cfg.networkpassword}
                 onValueChange={(v) => edit({ networkpassword: v })}
                 onGenerate={generatePassword}
-                onCopy={async (v) => log(await copyText(v) ? t('log.passwordCopied') : t('action.copyFailed'))}
+                onCopy={copyPassword}
                 // Passed rather than left to the component's English defaults: a default string
                 // inside a component is a string the catalogue cannot reach.
                 labels={{

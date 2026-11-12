@@ -9,52 +9,15 @@
  * Needs a DOM, so `happy-dom` is a devDependency. If `bun test` starts failing at the import here,
  * that is the dependency having gone missing, not the components.
  */
-import { test, expect, beforeAll, afterAll } from 'bun:test'
-import { Window } from 'happy-dom'
+import { test, expect } from 'bun:test'
 import { act, useState } from 'react'
-import { createRoot } from 'react-dom/client'
 import Tabs, { Tab } from './Tabs.jsx'
 import Checkbox from './Checkbox.jsx'
 import Field from './Field.jsx'
 import TextInput from './TextInput.jsx'
+import { useDom } from '../testing/dom.js'
 
-const win = new Window({ url: 'http://localhost' })
-
-// react-dom reads `document` and `window` off globalThis, so a DOM test has no choice but to put
-// them there. It DOES have a choice about putting them back, and it has to: `bun test` shares one
-// global object across every file, this file sorts before `src/lib/`, and `lib/clipboard.test.js`
-// asserts what `copyText` does when there is NO `navigator.clipboard`. Leaving happy-dom's behind
-// made that test pass a clipboard it was written to prove the absence of - six failures in a file
-// this one never imports.
-const GLOBALS = [
-  'window', 'document', 'navigator', 'HTMLElement', 'Node',
-  'Event', 'KeyboardEvent', 'MouseEvent', 'getComputedStyle',
-]
-const saved = new Map()
-
-beforeAll(() => {
-  for (const name of GLOBALS) {
-    saved.set(name, Object.getOwnPropertyDescriptor(globalThis, name))
-    globalThis[name] = win[name]
-  }
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true
-})
-
-afterAll(() => {
-  for (const name of GLOBALS) {
-    const descriptor = saved.get(name)
-    if (descriptor) Object.defineProperty(globalThis, name, descriptor)
-    else delete globalThis[name]
-  }
-  delete globalThis.IS_REACT_ACT_ENVIRONMENT
-})
-
-function mount(element) {
-  const host = document.createElement('div')
-  document.body.appendChild(host)
-  act(() => createRoot(host).render(element))
-  return host
-}
+const { win, mount } = useDom()
 
 function press(el, key) {
   act(() => {

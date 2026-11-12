@@ -280,3 +280,33 @@
 /* The badge column is the shrinker, not the tabs. With a third (Setup) tab present at 420px the
    labels would otherwise wrap and grow the strip taller. */
 .tab { white-space: nowrap; }
+
+/* --- Unsupported game build -------------------------------------------------------------------
+   The badge's "partial" colours, because it is the same claim: the files are right and the patch
+   still will not run. Not the danger colours - nothing is broken and nothing should be undone. */
+.build-warn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--warn-line);
+  border-radius: var(--radius-md);
+  background: var(--warn-soft);
+  color: var(--warn-text);
+  min-width: 0;
+}
+.build-warn-title { margin: 0; font-weight: 600; }
+.build-warn-body { margin: 0; font-size: var(--fs-xs); }
+.build-warn-report { display: flex; align-items: flex-start; gap: var(--sp-2); min-width: 0; }
+/* Selectable as well as copyable: on a WebKitGTK build where the clipboard refuses, selecting the
+   text by hand is the fallback, so it must not be `user-select: none` or truncated. */
+.build-report {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  white-space: pre;
+  overflow-x: auto;
+  user-select: text;
+}

@@ -1,5 +1,6 @@
 /**
- * Log-line formatting. One function, because that is all the UI needs.
+ * Text whose exact shape something else depends on: the log-line wire format StatusLog parses,
+ * and the build report a maintainer compares against the DLL's own dialog.
  *
  * TOMBSTONE - this was 174 lines exporting eight helpers: formatBytes, truncatePath,
  * utf8ByteLength, truncateUtf8Bytes, MAX_PLAYER_NAME_BYTES, appendLogLine, LOG_LINE_LIMIT. None
@@ -30,4 +31,35 @@ function stamp() {
  */
 export function formatLogLine(text) {
   return `[${stamp()}] ${text}`
+}
+
+/** `0x` plus eight uppercase hex digits - printf's `0x%08X`, which is what the DLL writes. */
+function hex32(n) {
+  return `0x${(Number(n) >>> 0).toString(16).toUpperCase().padStart(8, '0')}`
+}
+
+/**
+ * The block a user pastes into a report when their BlackOps3.exe is not a build the patch knows.
+ *
+ * Byte-for-byte the three lines of patch/Arxan.cpp's unsupported-build MessageBox, minus the
+ * two-space indent the dialog uses to set them off from its prose. Same field names, same column
+ * alignment, same `%08X`: a maintainer should be able to match a report from this tool against one
+ * copied out of the game's dialog (or grep a ZLOG line) without having to normalise either.
+ *
+ * Deliberately NOT in the i18n catalogue, for the same reason as formatLogLine's brackets: it is
+ * read by a person comparing it to C source, and a translated "TimeDateStamp" helps nobody.
+ *
+ * Null for a missing build so a caller can render nothing rather than a block of zeros, which
+ * would read as three real values.
+ *
+ * @param {{ time_date_stamp: number, size_of_image: number, entry_point: number } | null | undefined} build
+ * @returns {string | null}
+ */
+export function formatBuildReport(build) {
+  if (!build) return null
+  return [
+    `TimeDateStamp: ${hex32(build.time_date_stamp)}`,
+    `SizeOfImage:   ${hex32(build.size_of_image)}`,
+    `EntryPoint:    ${hex32(build.entry_point)}`,
+  ].join('\n')
 }

@@ -6,6 +6,7 @@ import TextInput from './components/TextInput.jsx'
 import SecretInput from './components/SecretInput.jsx'
 import Checkbox from './components/Checkbox.jsx'
 import CopyButton from './components/CopyButton.jsx'
+import BuildNotice from './components/BuildNotice.jsx'
 
 /**
  * First-run setup, as the content of a tab.
@@ -44,6 +45,7 @@ export default function Wizard({
   onInstall,
   onLaunch,
   onCopyPassword,
+  onCopyBuildReport,
   onDismiss,
 }) {
   // Which row the user has pulled open, or null for "whichever one is outstanding". Cleared by
@@ -55,6 +57,8 @@ export default function Wizard({
   const settingsDone = state.conf_exists
   const patchDone = state.dsound_installed && state.patch_installed && !state.foreign_dsound
   const allDone = folderDone && settingsDone && patchDone
+  // Strictly false: null is "could not read the exe", which the folder step already reports.
+  const buildUnsupported = state.game_build?.supported === false
 
   const act = (fn) => async () => { setOpened(null); await fn() }
 
@@ -84,6 +88,10 @@ export default function Wizard({
           <p className="wiz-note">
             {folderDone ? t('wizard.folderFound') : dir ? t('state.notGameDir') : t('protection.actionBrowse')}
           </p>
+          {/* Only the quiet half. The unsupported warning sits above the list instead, because this
+              row ticks green as soon as the exe is found and then collapses - a warning in here
+              would be hidden on exactly the screen where the user thinks they are finished. */}
+          {!buildUnsupported && <BuildNotice build={state.game_build} quiet />}
         </>
       ),
     },
@@ -162,7 +170,9 @@ export default function Wizard({
       // hijack does nothing until WINEDLLOVERRIDES is in the Steam launch options, and nothing
       // here can read that. Ticking green anyway would be the same unconditional claim the
       // predecessor's DoneStep made, which is the one thing this wizard exists not to repeat.
-      done: allDone && !launchOption,
+      //
+      // Nor on a build the DLL will refuse: the files are right and the patch still does nothing.
+      done: allDone && !launchOption && !buildUnsupported,
       body: (
         <>
           {/* onboard.doneBody is the predecessor's Wizard_DoneSummary, and it is the sentence that
@@ -171,7 +181,9 @@ export default function Wizard({
           <p className="wiz-note">
             {!allDone
               ? t('wizard.playBlocked')
-              : launchOption
+              : buildUnsupported
+                ? t('build.unsupportedBadge')
+                : launchOption
                 ? t('wizard.playNeedsLaunchOption')
                 : t('onboard.doneBody')}
           </p>
@@ -210,7 +222,19 @@ export default function Wizard({
 
   return (
     <div className="wiz">
-      <p className="wiz-intro">{allDone ? t('wizard.introDone') : t('wizard.intro')}</p>
+      {/* "Everything is in place" is the predecessor's unconditional claim again on Linux, where a
+          launch option nobody can probe still stands between the files and a working patch, and
+          "three things" undercounts there. So the platform picks the sentence, not just allDone.
+          A build the DLL will refuse outranks both: the files being right is then not "in place",
+          and the launch option is moot until a release supports the build. */}
+      <p className="wiz-intro">
+        {allDone
+          ? (buildUnsupported ? t('wizard.introDoneUnsupported')
+            : launchOption ? t('wizard.introDoneLaunchOption') : t('wizard.introDone'))
+          : (launchOption ? t('wizard.introLaunchOption') : t('wizard.intro'))}
+      </p>
+
+      <BuildNotice build={buildUnsupported ? state.game_build : null} onCopy={onCopyBuildReport} />
 
       <ol className="wiz-steps">
         {steps.map((step, index) => {
