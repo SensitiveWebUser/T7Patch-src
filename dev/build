@@ -1,0 +1,663 @@
+#!/usr/bin/env bash
+#
+# Local build for T7Patch. Runs in a container, so the only host requirement is a
+# container engine - Docker or Podman, either is fine. Output goes to dev/out/.
+#
+# usage:
+#   ./dev/build                  the full build - identical to --dll --injector
+#   ./dev/build --dll            just the DLLs (all a Linux/Proton install needs)
+#   ./dev/build --injector       just the injector tool (linux-x64 + win-x64)
+#   ./dev/build --debug          -Og -g instead of -O2
+#   ./dev/build --release        -O2 (the default; only useful to override an earlier --debug)
+#   ./dev/build --shell          drop into the container
+#   ./dev/build --clean          remove everything this script generates
+#   ./dev/build --help           print this usage block
+#
+# The build selectors (--dll/--injector) combine: given together both run, and --injector always
+# rebuilds the DLLs whether or not --dll was asked for - but a run without an explicit --dll
+# embeds that pair and clears it back out of dev/out/, so the loose DLLs are left behind only
+# when --dll was asked for.
+#
+# TWO IMAGES. The DLLs need mingw-w64; the tool needs a Rust toolchain plus the WebKitGTK
+# development headers. Keeping them apart means a --dll run does not pull ~2GB it has no use for,
+# and the tool image is built only the first time --injector is asked for.
+#
+# The .NET + Eto.Forms implementation this replaced is parked, unbuilt, in LeaveJustInCase/ - see
+# that directory's README and injector/PARITY-TODO.md for what it still holds that the
+# Tauri port does not.
+#
+# TEST BUILD. mingw-w64 is a different compiler and a different C runtime from the
+# MSVC build that ships, and this codebase depends on precisely what the shipped
+# build does (AGENTS.md). Publish only MSVC builds from Windows.
+
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+root="$(dirname "$here")"
+patch="$root/patch"               # t7patch.dll source lives here, dev/ stays at the repo root
+dsound_proxy="$root/dsound-proxy" # dsound.dll hijack proxy source - see that dir's own remarks
+out="$here/out"                   # the only directory a build leaves on the host
+
+# Everything else lives on a container-only scratch path; the container is --rm, so only
+# dev/out/ survives the build.
+scratch="/tmp/t7patch-build"
+obj="$scratch/obj"
+shim="$scratch/shim"
+home="$scratch/home"
+
+opt="-O2"
+# What this invocation will actually build. Derived below from the selector flags rather than
+# set directly by them - see the comment above the derivation.
+do_dll=0
+do_injector=0
+# Each selector flag records only that it was explicitly asked for. want_dll stays meaningful
+# after the derivation: --injector forces do_dll=1 to have something to embed, and only want_dll
+# says whether the loose DLLs are a deliverable the user actually asked for.
+want_dll=0
+want_injector=0
+want_shell=0
+
+die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+step() { printf '\n\033[36m==>\033[0m %s\n' "$*"; }
+note() { printf '    \033[90m%s\033[0m\n' "$*"; }
+
+# Portable SHA-256 of stdin, first hex field only. Linux has sha256sum; macOS ships
+# shasum instead; openssl is the last resort. Only used host-side to tag the image,
+# so any of the three is fine as long as it is stable.
+sha256_stdin() {
+    if   command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1
+    elif command -v shasum    >/dev/null 2>&1; then shasum -a 256 | cut -d' ' -f1
+    elif command -v openssl   >/dev/null 2>&1; then openssl dgst -sha256 | sed 's/.*= *//'
+    else die "need one of: sha256sum, shasum, or openssl on PATH"
+    fi
+}
+
+# The image is tagged with a hash of this text, so editing it rebuilds automatically.
+dockerfile() {
+    cat <<'EOF'
+# Plain Debian. This used to be the .NET SDK image, ~800MB of it, because the image also ran
+# `dotnet publish` for the Eto.Forms tool. That tool is gone (parked in LeaveJustInCase/), so all
+# this image still does is cross-compile two DLLs with mingw-w64 - and the same Debian base the
+# Tauri image uses is enough for that.
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64 git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+# MinHook ships as an MSVC-built .lib that won't link against the mingw CRT, so it's built
+# from source here instead (four C files, MIT licensed) - baked into the image so a build
+# needs no network. Pinned to a specific commit, not a mutable branch, so the image doesn't
+# silently rebuild against upstream HEAD - matches the pin in build.yml's dll-mingw-test job,
+# keep both in step. Currently d94c64d, 2026-06-13, "Fix link to MinHook article in README".
+RUN mkdir -p /opt/minhook && cd /opt/minhook && git init -q \
+ && git remote add origin https://github.com/TsudaKageyu/minhook.git \
+ && git fetch --depth 1 origin d94c64d32ea37bc4f5ee47d580709f70c6fb6080 \
+ && git checkout -q FETCH_HEAD \
+ && rm -rf /opt/minhook/.git
+# The NuGet pre-warm that used to live here - and the corrupt-partial-download bug it grew a
+# workaround for - went with the .NET build. Nothing in this image resolves packages any more.
+ENV T7PATCH_IN_CONTAINER=1 MINHOOK_SRC=/opt/minhook
+WORKDIR /work
+EOF
+}
+
+# The SECOND image, used only by --injector, and built only the first time --injector is asked for.
+# Kept separate from the one above rather than merged into it because merging would put a Rust
+# toolchain and the WebKitGTK development headers - ~2GB - on the path of every DLL build, which
+# needs none of it. Tagged by its own hash, so editing this function rebuilds only this image.
+injector_dockerfile() {
+    cat <<'EOF'
+# Debian rather than the rust:* image so the WebKitGTK packages come from one apt source at a
+# matching version. libwebkit2gtk-4.1-dev is what Tauri 2 needs (4.0 is the Tauri 1 line) - and
+# needing it AT ALL is one of the evaluation's findings: the .NET build has no host equivalent.
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential curl ca-certificates pkg-config unzip \
+      libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev \
+ && rm -rf /var/lib/apt/lists/*
+# Bun for the React frontend. No Node in this image at all: Vite 8 bundles with rolldown and runs
+# under bun, so the JS runtime is one pinned binary instead of a NodeSource apt repo. Pinned like
+# the Rust toolchain below - an unpinned JS runtime is how a build that worked last month stops.
+# BUN_INSTALL and CARGO_HOME are fixed paths rather than the default $HOME/... because the
+# container runs as the invoking host user, whose HOME is not known when this layer is built -
+# the same reasoning as MINHOOK_SRC in the image above.
+ENV BUN_INSTALL=/opt/bun PATH=/opt/bun/bin:/opt/cargo/bin:$PATH
+RUN curl -fsSL https://bun.sh/install | bash -s -- bun-v1.4.2 \
+ && chmod -R a+rwX /opt/bun
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain 1.90.0 \
+ && rustup target add x86_64-pc-windows-msvc \
+ && chmod -R a+rwX /opt/cargo /opt/rustup
+# Windows cross-compilation, so one Linux container produces both platforms, as the .NET build
+# Linux container. cargo-xwin fetches Microsoft's own CRT and Windows SDK headers/libs on first
+# use and targets x86_64-pc-windows-msvc; clang and llvm supply the compiler and the resource
+# compiler (llvm-rc) that tauri-build needs for the .rc file. lld is the linker.
+#
+# This is the MSVC ABI, which is what Tauri's Windows dependencies expect - the mingw target is
+# not a supported path for WebView2. Compare the .NET side, which cross-compiles to win-x64 with
+# no extra toolchain at all: this is ~700MB of additional image to reach the same place.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends clang lld llvm \
+ && rm -rf /var/lib/apt/lists/*
+RUN /opt/cargo/bin/cargo install cargo-xwin --locked \
+ && chmod -R a+rwX /opt/cargo
+# xwin caches the downloaded SDK here; outside HOME for the same reason as everything else.
+ENV XWIN_CACHE_DIR=/opt/xwin
+RUN mkdir -p /opt/xwin && chmod -R a+rwX /opt/xwin
+ENV T7PATCH_IN_CONTAINER=1 CARGO_TERM_COLOR=always
+WORKDIR /work
+EOF
+}
+
+args=("$@")
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dll)      want_dll=1; shift ;;
+        --injector) want_injector=1; shift ;;
+        --debug)    opt="-Og -g"; shift ;;
+        --release)  opt="-O2"; shift ;;
+        --shell)    want_shell=1; shift ;;
+        --clean)    shift
+                    # --clean acts immediately and exits - any other flag given alongside it
+                    # (before or after, e.g. `--clean --injector`) is silently accepted and then
+                    # never acted on, with no message. Warn rather than fix by running both:
+                    # cleaning and building in one invocation would mean building against an
+                    # image/scratch state this same command just tore down.
+                    if [ "$want_dll" = 1 ] || [ "$want_injector" = 1 ] || [ $# -gt 0 ]; then
+                        note "--clean ignores every other flag - run the build again separately."
+                    fi
+                    rm -rf "$out"
+                    # The tool's generated trees, on the same "remove everything this
+                    # script generates" rule. Its assets/*.dll are a copy of dev/out's pair -
+                    # embedded with include_bytes!, so a stale one would silently ship.
+                    rm -rf "$root/injector/target" "$root/injector/ui/node_modules" \
+                        "$root/injector/ui/dist" "$root/injector/src-tauri/gen"
+                    rm -f "$root/injector/assets"/*.dll
+                    echo "cleaned"; exit 0 ;;
+        # --help is anchored on the header's own "# usage:" marker, not a literal line range:
+        # the old '3,13p' silently omitted --release and --help (both real, both documented in
+        # dev/README.md) and would drift out of alignment on any future edit above it.
+        -h|--help)  sed -n '/^# usage:$/,/^#$/p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'; exit 0 ;;
+        *)          die "unknown option: $1 (try --help)" ;;
+    esac
+done
+
+# The selectors are additive: each flag only records a request, and what actually runs is
+# derived here. --injector always forces the DLL build regardless, so a stale or absent DLL pair
+# can never get embedded by forgetting a separate --dll run first.
+# --shell is not a build selector, so a bare '--shell' must not fall into the "no selector given"
+# branch below. That set both selectors, and the shell dispatch tests want_injector first, so a
+# bare --shell opened the ~2GB injector image instead of the default one it documents.
+if [ "$want_shell" = 0 ] && [ "$want_dll" = 0 ] && [ "$want_injector" = 0 ]; then
+    # No selector at all: the default is the complete build, exactly as if both selectors had
+    # been given. Set the wants rather than only the do_s, because want_dll is what the staging
+    # step reads to decide whether the loose DLL pair is a deliverable in its own right - a
+    # default run asks for both, so both are kept, while a --injector-only run gets just the tool.
+    want_dll=1; want_injector=1
+fi
+do_dll="$want_dll"; do_injector="$want_injector"
+if [ "$do_injector" = 1 ]; then do_dll=1; fi
+
+# T7PATCH_STAGE says which of the two images a container is, and splits the work accordingly -
+# the main image has no cargo or bun, the Tauri image has no mingw or dotnet, and both are handed
+# the same original argv. Unset on the host, where the flags mean what the user typed.
+stage_injector_assets=0
+case "${T7PATCH_STAGE:-}" in
+    injector) do_dll=0; do_injector=1 ;;
+    main)  # --injector here means only "stage the freshly built DLL pair for the other image",
+           # since core embeds it with include_bytes! and would otherwise compile the last one.
+           stage_injector_assets="$do_injector"; do_injector=0 ;;
+esac
+
+# ================================================================== host side
+
+if [ -z "${T7PATCH_IN_CONTAINER:-}" ]; then
+    engine=""
+    for c in docker podman; do command -v "$c" >/dev/null 2>&1 && { engine="$c"; break; }; done
+    if [ -z "$engine" ]; then
+        # The build is identical on every host - it runs in a Linux container - so the
+        # only requirement is a container engine and a bash to launch it.
+        case "$(uname -s)" in
+            Darwin) hint='    brew install --cask docker      # or: brew install colima docker && colima start' ;;
+            Linux)  hint=$'    sudo pacman -S --needed docker  # (or apt/dnf install docker.io)\n    sudo systemctl enable --now docker\n    sudo usermod -aG docker "$USER"   # then log out and back in' ;;
+            *)      hint='    Install Docker Desktop, and run this script from inside WSL2 (Ubuntu), not PowerShell.' ;;
+        esac
+        die "neither docker nor podman found."$'\n\n'"$hint"
+    fi
+
+    image="t7patch-dev:$(dockerfile | sha256_stdin | cut -c1-12)"
+
+    if ! "$engine" image inspect "$image" >/dev/null 2>&1; then
+        step "Building $image (first run, a few minutes)"
+        empty="$(mktemp -d "${TMPDIR:-/tmp}/t7patch.XXXXXX")"   # explicit template: BSD mktemp needs one
+        trap 'rm -rf "$empty"' EXIT
+        dockerfile | "$engine" build -t "$image" -f - "$empty" || die "image build failed"
+    fi
+
+    mkdir -p "$out"
+
+    tty=(-i); [ -t 0 ] && [ -t 1 ] && tty=(-i -t)
+    if [ "$want_shell" = 1 ]; then
+        # A real build re-invokes this script inside the container (the else branch below),
+        # which creates the scratch dirs before anything else runs. --shell instead drops
+        # straight into `bash`, skipping that setup - but HOME still points at one of those
+        # dirs, so an interactive shell would start with a HOME that doesn't exist and confuse
+        # anything that assumes it does (rc files, a bare `cd`). Recreate the dirs
+        # first so --shell matches a real build. $out is deliberately not in this list: it's
+        # a host path ($here/out), already created at line 182 and bind-mounted into the
+        # container - baking it into a container-side mkdir tried to create the host's own
+        # directory tree (e.g. /home/user/...) from inside the container, which failed outright
+        # under Docker (no permission to create /home) and, under rootless Podman, silently
+        # created an unrelated phantom directory instead of touching the real bind mount.
+        mkdirs="mkdir -p $(printf '%q ' "$obj" "$shim" "$home")"
+        cmd=(bash -c "$mkdirs && exec bash")
+    else
+        # ${args[@]+"${args[@]}"}, not a plain "${args[@]}": expanding an empty array that way
+        # under `set -u` is an unbound-variable error on bash 4.3 and older, and macOS still
+        # ships bash 3.2 (dev/README.md promises this runs under the stock one). args is empty
+        # exactly on the default, no-argument invocation, so a new macOS user would wait out
+        # the several-minute first image build only to hit "args[@]: unbound variable" here -
+        # any flagged invocation was unaffected, which is why it went unnoticed.
+        cmd=(./dev/build ${args[@]+"${args[@]}"})
+    fi
+
+    # The EXIT trap above only fires on a normal shell exit (`die`, or a signal during the
+    # image build) - `exec` below replaces the process image outright and never runs pending
+    # EXIT traps, so every first-time image build would otherwise leak $empty under /tmp
+    # permanently. Clean it up explicitly before the exec; a no-op when $empty was never set
+    # (image already existed).
+    [ -n "${empty:-}" ] && rm -rf "$empty"
+
+    # Run as the invoking user so dev/out/ isn't root-owned. The repo is mounted, but
+    # everything the build writes besides dev/out/ goes to a container-only path ($scratch)
+    # including HOME - some tools insist on writing there and the real home isn't mounted.
+    #
+    # Rootless podman is the exception and must NOT get --user: it already maps the invoking
+    # host user to container root, so output is correctly owned with no flag. Forcing
+    # --user <hostuid> instead runs as a container UID that maps to a host *subuid* with no
+    # write access to the bind-mounted dev/out - the DLL link then fails with a bare "link
+    # failed" pointing nowhere near permissions. Podman is a first-class engine per
+    # dev/README.md, so this has to work. Ask podman itself whether it's rootless rather than
+    # guess from `id -u` (rootful `sudo podman` wants --user like docker does); fall through
+    # to the docker behavior if the query fails.
+    asuser=(--user "$(id -u):$(id -g)")
+    if [ "$engine" = podman ] \
+       && [ "$("$engine" info --format '{{.Host.Security.Rootless}}' 2>/dev/null)" = "true" ]; then
+        asuser=()
+    fi
+
+    # Two container runs rather than one exec, because --injector needs a different image. Ordered,
+    # not parallel: the main image is what builds the DLL pair and stages it into
+    # injector/assets/, and the Tauri image embeds that pair with include_bytes!. `exec`
+    # would replace this process and never reach the second run, so this uses a plain run and
+    # propagates the exit status itself.
+    # stage= names which of the two images a container is for. The Tauri image has neither
+    # mingw nor dotnet, so the re-invoked script inside it must run the Tauri stage and nothing
+    # else - see where T7PATCH_STAGE is read, just above the host-side block.
+    run_in() {
+        local img="$1" stage="$2"; shift 2
+        "$engine" run --rm "${tty[@]}" \
+            -v "$root:/work" -w /work \
+            ${asuser[@]+"${asuser[@]}"} -e HOME="$home" -e T7PATCH_STAGE="$stage" \
+            "$img" "$@"
+    }
+
+    # Built lazily, so a run that never asks for --injector never downloads ~2GB of Rust and
+    # WebKitGTK. Tagged by its own hash, independently of the main image.
+    ensure_injector_image() {
+        injector_image="t7patch-injector:$(injector_dockerfile | sha256_stdin | cut -c1-12)"
+        "$engine" image inspect "$injector_image" >/dev/null 2>&1 && return 0
+        step "Building $injector_image (first --injector run, several minutes - Rust + WebKitGTK)"
+        # Cleaned up on the next line rather than by an EXIT trap. A trap here fired after this
+        # function had returned, when a `local` of that name was out of scope - and `set -u`
+        # turned that into "unbound variable", so the FIRST --injector run exited 1 despite having
+        # built the image successfully, and leaked the temp dir. It also clobbered the trap the
+        # main image build had already set.
+        local d rc=0
+        d="$(mktemp -d "${TMPDIR:-/tmp}/t7inj.XXXXXX")"
+        injector_dockerfile | "$engine" build -t "$injector_image" -f - "$d" || rc=$?
+        rm -rf "$d"
+        [ "$rc" = 0 ] || die "injector image build failed"
+    }
+
+    if [ "$want_shell" = 1 ]; then
+        # `--shell --injector` opens the Tauri toolchain instead of the default one, since that is
+        # the shell anyone poking at cargo or bun actually wants.
+        if [ "$want_injector" = 1 ]; then
+            ensure_injector_image
+            exec "$engine" run --rm "${tty[@]}" -v "$root:/work" -w /work/injector \
+                ${asuser[@]+"${asuser[@]}"} -e HOME="$home" -e T7PATCH_STAGE=injector \
+                "$injector_image" "${cmd[@]}"
+        fi
+        exec "$engine" run --rm "${tty[@]}" -v "$root:/work" -w /work \
+            ${asuser[@]+"${asuser[@]}"} -e HOME="$home" -e T7PATCH_STAGE=main \
+            "$image" "${cmd[@]}"
+    fi
+
+    # Ordered, not parallel, and not an `exec`: the main image builds the DLL pair and stages it
+    # into injector/assets/, and the Tauri image embeds that pair with include_bytes!. An
+    # exec would replace this process and never reach the second run, so this propagates the
+    # exit status by hand instead.
+    if [ "$do_dll" = 1 ]; then
+        run_in "$image" main "${cmd[@]}" || exit $?
+    fi
+
+    if [ "$do_injector" = 1 ]; then
+        ensure_injector_image
+        run_in "$injector_image" injector bash /work/dev/build --injector || exit $?
+    fi
+
+    exit 0
+fi
+
+# ============================================================= container side
+
+CXX="x86_64-w64-mingw32-g++"
+CC="x86_64-w64-mingw32-gcc"
+minhook="${MINHOOK_SRC:-/opt/minhook}"
+
+# Exported names of a PE, one per line. Both DLLs here are checked against a required list;
+# extracted once instead of duplicating the same three-line pipeline for each.
+#
+# Reads the PE export directory, not the COFF symbol table - nm reports a different set and
+# gives false negatives. A DLL missing an export loads fine and silently does nothing, which
+# looks exactly like the patch not working.
+#
+# The second sed matches objdump's "\t[   N] name" row shape, not "everything up to a ']'":
+# the address range starts at its own "[Ordinal/Name Pointer] Table" header line, which the
+# looser pattern turned into a bogus export named "Table" - harmless for grep -qx (no real
+# symbol is named that) but inflated the export count and polluted the failure dump. Keep in
+# step with the same pipeline in build.yml's mingw jobs.
+pe_exports() {
+    x86_64-w64-mingw32-objdump -p "$1" \
+        | sed -n '/\[Ordinal\/Name Pointer\] Table/,/^$/p' \
+        | sed -n 's/^[[:space:]]*\[[[:space:]]*[0-9]\{1,\}\][[:space:]]//p'
+}
+
+# Clear stale output before building, not just after: the final steps overwrite these paths
+# directly (cp for the injector exes, linker output for the DLLs), and a leftover file still
+# open elsewhere (the running exe, or a lock through a Windows-mounted WSL path) would make
+# that overwrite fail outright instead of just going stale. Removing first guarantees a fresh
+# create.
+#
+# Only clear what this invocation will actually rebuild, so a mode that doesn't regenerate a
+# given artifact leaves the previous run's copy alone rather than deleting it with nothing to
+# put back.
+if [ "$do_dll" = 1 ]; then
+    rm -f "$out"/*.dll 2>/dev/null || true
+fi
+if [ "$do_injector" = 1 ]; then
+    rm -f "$out"/T7Patch-linux-x64 "$out"/T7Patch-win-x64.exe 2>/dev/null || true
+fi
+# Unconditional, unlike the scoped removals above: nothing writes any of these any more. They are
+# three superseded naming schemes, and a dev/out/ predating each switch keeps well over 100MB of
+# stale binaries that the "Done" listing globs and prints next to the fresh ones with nothing
+# marking them stale. Scoped to a selector they would survive forever.
+#
+# DO NOT add the current names (T7Patch-linux-x64, T7Patch-win-x64.exe) to this list. They were
+# briefly here by accident after the rename that adopted them, which meant a plain
+# './dev/build --dll' silently deleted tool binaries a previous run had produced. The scoped
+# block above already clears them, and only on a run that will rebuild them.
+rm -f "$out"/T7Patch-tauri-win-x64.exe "$out"/T7Patch-tauri-linux-x64 2>/dev/null || true
+rm -f "$out"/T7Patch.Injector-win-x64.exe "$out"/T7Patch.Injector-linux-x64 2>/dev/null || true
+rm -rf "$out"/T7Patch-linux-files 2>/dev/null || true
+
+mkdir -p "$out" "$obj" "$shim" "$home"
+
+build_dll() {
+    step "Building t7patch.dll"
+    note "$($CXX --version | head -1)"
+
+    mkdir -p "$shim"
+
+    # The source includes <Winternl.h> and <TlHelp32.h>. MSVC's SDK is case-insensitive;
+    # mingw ships them lowercase and Linux is case-sensitive. Symlinks rather than
+    # editing the includes, since the capitalised spelling is what upstream uses.
+    local sysroot=/usr/share/mingw-w64/include
+    [ -d "$sysroot" ] || sysroot=/usr/x86_64-w64-mingw32/include
+    for p in Winternl.h:winternl.h TlHelp32.h:tlhelp32.h; do
+        [ -f "$sysroot/${p##*:}" ] || die "missing $sysroot/${p##*:}"
+        ln -sf "$sysroot/${p##*:}" "$shim/${p%%:*}"
+    done
+
+    # __report_gsfailure is an MSVC CRT internal - the handler run when a stack cookie
+    # check fails - and Hooks.cpp takes its address to detour it. mingw has no
+    # equivalent, so a stub stands in and that one hook is inert here. Nothing else
+    # is affected.
+    printf '#pragma once\nextern "C" void __report_gsfailure(void);\n' > "$shim/msvc_compat.h"
+    printf 'extern "C" void __report_gsfailure(void) {}\n' > "$shim/msvc_compat.cpp"
+
+    rm -rf "$obj"; mkdir -p "$obj"
+    local objs=()
+
+    note "MinHook"
+    for c in "$minhook"/src/*.c "$minhook"/src/hde/*.c; do
+        [ -f "$c" ] || continue
+        $CC $opt -c "$c" -o "$obj/mh_$(basename "${c%.c}").o" -I"$minhook/include" \
+            || die "compiling $(basename "$c") failed"
+        objs+=("$obj/mh_$(basename "${c%.c}").o")
+    done
+
+    local cxxflags=(
+        -std=c++20 $opt -fms-extensions
+        -Wno-invalid-offsetof -Wno-unused-value -Wno-attributes
+        -DWIN32 -D_WINDOWS -D_USRDLL -DT7PATCH_EXPORTS -DNDEBUG
+        -D_CRT_SECURE_NO_WARNINGS -DMINGW_HAS_SECURE_API=1 -D_WIN32_WINNT=0x0601
+        -include "$shim/msvc_compat.h" -I"$shim" -I"$patch" -I"$minhook/include"
+    )
+
+    $CXX "${cxxflags[@]}" -c "$shim/msvc_compat.cpp" -o "$obj/msvc_compat.o" || die "stub failed"
+    objs+=("$obj/msvc_compat.o")
+
+    local sources=()
+    shopt -s nullglob
+    local f
+    for f in "$patch"/*.cpp; do
+        sources+=("$(basename "$f")")
+    done
+    shopt -u nullglob
+    [ ${#sources[@]} -gt 0 ] || die "no .cpp files found in $patch"
+    note "${#sources[@]} translation units"
+    for s in "${sources[@]}"; do
+        printf '        %s\n' "$s"
+        $CXX "${cxxflags[@]}" -c "$patch/$s" -o "$obj/${s%.cpp}.o" || die "compiling $s failed"
+        objs+=("$obj/${s%.cpp}.o")
+    done
+
+    # patch/T7Patch.vcxproj links only libMinHook.x64.lib (no detours.lib), so this
+    # matches it - nothing else to link here.
+    note "linking"
+    $CXX -shared -o "$out/t7patch.dll" "${objs[@]}" -static \
+        -lkernel32 -luser32 -ladvapi32 -lws2_32 -lshell32 -lole32 -lpsapi \
+        || die "link failed"
+
+    local exports
+    exports="$(pe_exports "$out/t7patch.dll")"
+
+    local missing=""
+    for sym in EnableInjectorlessInstall zbr_run_gamemode_lui Unload \
+               SetPlayerName SetNetworkPassword SetFriendsOnly; do
+        grep -qx "$sym" <<<"$exports" || missing="$missing $sym"
+    done
+
+    if [ -n "$missing" ]; then
+        note "exported:"; sed 's/^/        /' <<<"$exports"
+        die "t7patch.dll is missing expected exports:$missing"
+    else
+        note "exports present ($(grep -c . <<<"$exports") total)"
+    fi
+}
+
+build_dsound_proxy() {
+    step "Building dsound.dll (proxy)"
+
+    # Same mingw toolchain and target as t7patch.dll. Only depends on <windows.h>/<cstring>
+    # and kernel32/user32 (EnumWindows etc., used to time activation off the game's main
+    # window - see dsound_proxy.cpp's file header), so none of build_dll's shims are needed.
+    # -static for the same no-companion-runtime-DLLs guarantee as t7patch.dll's link line.
+    #
+    # -Wall -Wextra here but deliberately not in build_dll: t7patch.dll is MSVC-first code
+    # where mingw is only a test build, hence its suppression list. This file is the opposite -
+    # greenfield, mingw-only, no MSVC project, hand-rolled fixed-buffer pointer arithmetic - so
+    # this is the only compiler that will ever see it. Not -Werror: a warning shouldn't block
+    # the one build of dsound.dll that ships. Keep in step with build.yml's dsound-mingw job.
+    #
+    # -Wno-cast-function-type: every RealProc(...) trampoline casts GetProcAddress's generic
+    # FARPROC to the real DirectSound entry point's actual signature - the standard, unavoidable
+    # shape of dynamic-loading code, not a real type-safety gap (RealProc always resolves the
+    # exact named export from the real system dsound.dll, so the cast is correct by construction).
+    # Left enabled without this it produced 13 warnings on every build, one per trampoline.
+    $CXX -std=c++20 $opt -Wall -Wextra -Wno-cast-function-type -shared -DNDEBUG -D_WIN32_WINNT=0x0601 \
+        -o "$out/dsound.dll" "$dsound_proxy/dsound_proxy.cpp" -static -lkernel32 -luser32 \
+        || die "dsound proxy compile/link failed"
+
+    local exports
+    exports="$(pe_exports "$out/dsound.dll")"
+
+    local missing=""
+    for sym in DirectSoundCreate DirectSoundCreate8 DirectSoundEnumerateA DirectSoundEnumerateW \
+               DllCanUnloadNow DllGetClassObject DirectSoundCaptureCreate DirectSoundCaptureCreate8 \
+               DirectSoundCaptureEnumerateA DirectSoundCaptureEnumerateW GetDeviceID \
+               DirectSoundFullDuplexCreate; do
+        grep -qx "$sym" <<<"$exports" || missing="$missing $sym"
+    done
+
+    if [ -n "$missing" ]; then
+        die "dsound proxy is missing expected exports:$missing"
+    fi
+    note "all 12 DirectSound exports present"
+}
+
+
+# Builds the injector tool. Runs in the second image, reached only via the host-side --injector
+# branch - see injector/README.md.
+build_injector() {
+    # --debug/--release select the cargo profile too, not just the C++ optimisation level. They
+    # used to be silently ignored here, so `./dev/build --debug` produced an optimised, stripped
+    # binary with no symbols - the opposite of what was asked for.
+    local profile=release profile_dir=release
+    if [ "$opt" != "-O2" ]; then profile=dev; profile_dir=debug; fi
+
+    step "Building the frontend (Vite under bun)"
+    cd "$root/injector/ui"
+    # --frozen-lockfile so a hand-edited package.json fails loudly here rather than silently
+    # resolving to versions nobody measured.
+    bun install --frozen-lockfile
+    bun run build
+
+    step "Building the tool (linux-x64, $profile profile)"
+    cd "$root/injector"
+    cargo build --profile "$profile" -p t7patch-ui
+
+    local bin="$root/injector/target/$profile_dir/T7Patch"
+    [ -f "$bin" ] || die "cargo reported success but $bin is missing"
+    cp "$bin" "$out/T7Patch-linux-x64"
+    chmod +x "$out/T7Patch-linux-x64"
+
+    # Cross-compiled with cargo-xwin against Microsoft's own CRT and SDK. Deliberately NOT fatal:
+    # it needs a first-run download from Microsoft, so it is the one step here that can fail for
+    # reasons that have nothing to do with the code, and the Linux binary above is already a
+    # usable deliverable. The RELEASE Windows build is CI's injector-win job on windows-latest
+    # with a real MSVC toolchain; this leg is local convenience.
+    step "Cross-compiling for win-x64 ($profile profile, MSVC ABI via cargo-xwin)"
+    if cargo xwin build --profile "$profile" --target x86_64-pc-windows-msvc -p t7patch-ui; then
+        local winbin="$root/injector/target/x86_64-pc-windows-msvc/$profile_dir/T7Patch.exe"
+        if [ -f "$winbin" ]; then
+            cp "$winbin" "$out/T7Patch-win-x64.exe"
+        else
+            note "cargo xwin reported success but $winbin is missing - skipping the Windows exe"
+        fi
+    else
+        note "WINDOWS CROSS-BUILD FAILED. The linux-x64 binary above is unaffected."
+        note "CI's injector-win job builds this on windows-latest and is the release path."
+    fi
+
+    note ""
+    note "Running the Linux binary needs webkit2gtk on the host - without it it dies in ld.so"
+    note "with no window and no message. There is no macOS build; see injector/README.md."
+}
+
+if [ "$do_dll" = 1 ]; then build_dll; build_dsound_proxy; else step "Skipping DLL build"; fi
+
+# Staged here, in the mingw image, rather than in the Tauri container: by the time that container
+# starts, the pair it embeds with include_bytes! is already in place.
+if [ "$stage_injector_assets" = 1 ]; then
+    step "Staging the DLL pair for the injector"
+    mkdir -p "$root/injector/assets"
+    cp "$out/t7patch.dll" "$out/dsound.dll" "$root/injector/assets/"
+
+    # Stripped before embedding, and ONLY the embedded copies - dev/out/ keeps the full pair, so
+    # a manual hijack install and any debugging still have symbols.
+    #
+    # This is the single largest size lever in the project: measured 2,952,744 -> 1,239,040 bytes,
+    # 1,713,704 saved, 58% of the payload, and the payload is the largest single thing in the
+    # binary. mingw emits DWARF straight into the DLL (.debug_info, .debug_line, .debug_loclists
+    # and friends) plus a COFF symbol table, none of which the loader reads.
+    #
+    # Exports come from the PE export DIRECTORY, not the symbol table, so --strip-all cannot
+    # remove them - verified after stripping: t7patch.dll keeps all 6 including the
+    # EnableInjectorlessInstall/zbr_run_gamemode_lui pair the loader calls, dsound.dll keeps all
+    # 12 DirectSound trampolines. The verification step below re-checks this on every build rather
+    # than trusting that measurement to hold.
+    #
+    # NOTE for the CI payload: that figure is for THIS mingw pair. MSVC keeps debug info in a
+    # separate .pdb, so the shipped MSVC t7patch.dll has far less to strip and will save much
+    # less. Do not quote 1.7 MB as the release number without re-measuring there.
+    for f in t7patch.dll dsound.dll; do
+        before=$(stat -c%s "$root/injector/assets/$f")
+        x86_64-w64-mingw32-strip --strip-all "$root/injector/assets/$f"
+        after=$(stat -c%s "$root/injector/assets/$f")
+
+        # Re-verified AFTER stripping, not just after linking. A DLL that lost its exports still
+        # loads and silently does nothing, which is indistinguishable from the patch not working -
+        # and this is the one step that could plausibly cause that. Cheap insurance against a
+        # future binutils changing what --strip-all touches.
+        n=$(pe_exports "$root/injector/assets/$f" | grep -c .)
+        case "$f" in
+            t7patch.dll)
+                for e in EnableInjectorlessInstall zbr_run_gamemode_lui; do
+                    pe_exports "$root/injector/assets/$f" | grep -qx "$e" \
+                        || die "$f lost its $e export during --strip-all"
+                done ;;
+            dsound.dll)
+                [ "$n" -eq 12 ] || die "$f has $n exports after --strip-all, expected 12" ;;
+        esac
+        note "$f: $before -> $after bytes embedded ($((before - after)) stripped, $n exports intact)"
+    done
+    note "-> injector/assets/ (embedded with include_bytes!, so it must be current)"
+
+    # The pair is about to be embedded, so loose copies in dev/out/ are clutter unless an
+    # explicit --dll asked for them as a deliverable in their own right (the manual hijack
+    # install, which is the only method on Linux that does not involve running an exe).
+    if [ "$want_dll" = 0 ]; then
+        rm -f "$out/t7patch.dll" "$out/dsound.dll"
+        note "removed the loose dev/out/*.dll pair (now embedded in the Tauri binary);" \
+             "run ./dev/build --dll --injector to keep them"
+    fi
+fi
+
+if [ "$do_injector" = 1 ]; then build_injector; fi
+
+step "Done"
+for f in "$out"/*; do
+    [ -f "$f" ] || continue
+    printf '    %-26s %10s bytes  %s\n' \
+        "$(basename "$f")" "$(stat -c%s "$f")" "$(sha256sum "$f" | cut -c1-16)"
+done
+
+cat <<'EOF'
+
+Install:
+  Manual dsound hijack (from a default or --dll build; the only install method on
+  Linux that doesn't involve running an .exe, and works on Windows just the same):
+                cp dev/out/t7patch.dll and dev/out/dsound.dll next to BlackOps3.exe
+                keep the lowercase names - the proxy passes "t7patch.dll" as a literal
+                string to LoadLibraryA, and Wine's search order needs the exact dsound.dll name
+
+  Injector tool (both DLLs already embedded, nothing else to copy):
+  Windows       run dev/out/T7Patch-win-x64.exe
+  Linux/Proton  run dev/out/T7Patch-linux-x64
+                needs webkit2gtk installed (libwebkit2gtk-4.1-0 / webkit2gtk-4.1); without it
+                the binary dies in ld.so with no window and no message
+EOF
