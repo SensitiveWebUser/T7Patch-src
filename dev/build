@@ -358,8 +358,14 @@ fi
 
 # ============================================================= container side
 
-CXX="x86_64-w64-mingw32-g++"
-CC="x86_64-w64-mingw32-gcc"
+# The -posix variants, not Debian's default (win32 thread model). Upstream's Arxan.cpp uses
+# std::mutex, and GCC 12's libstdc++ built for the win32 thread model has no std::mutex at all -
+# the build failed with "'mutex' in namespace 'std' does not name a type" despite the #include.
+# Both variants come from the same g++-mingw-w64-x86-64 package, so the image is unchanged. The
+# posix model pulls in winpthreads, which -static on the link lines links in rather than leaving a
+# libwinpthread-1.dll import; check_no_runtime_dll_imports below enforces that.
+CXX="x86_64-w64-mingw32-g++-posix"
+CC="x86_64-w64-mingw32-gcc-posix"
 minhook="${MINHOOK_SRC:-/opt/minhook}"
 
 # Exported names of a PE, one per line. Both DLLs here are checked against a required list;
@@ -378,6 +384,15 @@ pe_exports() {
     x86_64-w64-mingw32-objdump -p "$1" \
         | sed -n '/\[Ordinal\/Name Pointer\] Table/,/^$/p' \
         | sed -n 's/^[[:space:]]*\[[[:space:]]*[0-9]\{1,\}\][[:space:]]//p'
+}
+
+# A DLL that imports a mingw runtime DLL is useless here: nothing ships those next to the game, so
+# the loader fails and the patch silently never runs. -static should prevent it; this proves it.
+check_no_runtime_dll_imports() {
+    local bad
+    bad="$(x86_64-w64-mingw32-objdump -p "$1" | sed -n 's/^[[:space:]]*DLL Name:[[:space:]]*//p' \
+        | grep -iE '^(libwinpthread|libstdc\+\+|libgcc)' || true)"
+    [ -z "$bad" ] || die "$(basename "$1") imports mingw runtime DLL(s): $bad - the link is not static"
 }
 
 # Clear stale output before building, not just after: the final steps overwrite these paths
@@ -478,6 +493,7 @@ build_dll() {
     $CXX -shared -o "$out/t7patch.dll" "${objs[@]}" -static \
         -lkernel32 -luser32 -ladvapi32 -lws2_32 -lshell32 -lole32 -lpsapi \
         || die "link failed"
+    check_no_runtime_dll_imports "$out/t7patch.dll"
 
     local exports
     exports="$(pe_exports "$out/t7patch.dll")"
@@ -518,6 +534,7 @@ build_dsound_proxy() {
     $CXX -std=c++20 $opt -Wall -Wextra -Wno-cast-function-type -shared -DNDEBUG -D_WIN32_WINNT=0x0601 \
         -o "$out/dsound.dll" "$dsound_proxy/dsound_proxy.cpp" -static -lkernel32 -luser32 \
         || die "dsound proxy compile/link failed"
+    check_no_runtime_dll_imports "$out/dsound.dll"
 
     local exports
     exports="$(pe_exports "$out/dsound.dll")"

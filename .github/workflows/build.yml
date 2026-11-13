@@ -216,7 +216,7 @@ jobs:
         run: |
           set -euo pipefail
           for c in /tmp/minhook/src/*.c /tmp/minhook/src/hde/*.c; do
-            x86_64-w64-mingw32-gcc -O2 -c "$c" -o "/tmp/obj/mh_$(basename "${c%.c}").o" -I/tmp/minhook/include
+            x86_64-w64-mingw32-gcc-posix -O2 -c "$c" -o "/tmp/obj/mh_$(basename "${c%.c}").o" -I/tmp/minhook/include
           done
 
       - name: Compile t7patch.dll (test build, mingw)
@@ -227,16 +227,25 @@ jobs:
             -DMINGW_HAS_SECURE_API=1 -D_WIN32_WINNT=0x0601
             -include /tmp/shim/msvc_compat.h -I/tmp/shim -Ipatch -I/tmp/minhook/include)
 
-          x86_64-w64-mingw32-g++ "${cxxflags[@]}" -c /tmp/shim/msvc_compat.cpp -o /tmp/obj/msvc_compat.o
+          x86_64-w64-mingw32-g++-posix "${cxxflags[@]}" -c /tmp/shim/msvc_compat.cpp -o /tmp/obj/msvc_compat.o
           objs=(/tmp/obj/mh_*.o /tmp/obj/msvc_compat.o)
           for s in patch/*.cpp; do
             obj="/tmp/obj/$(basename "${s%.cpp}").o"
-            x86_64-w64-mingw32-g++ "${cxxflags[@]}" -c "$s" -o "$obj"
+            x86_64-w64-mingw32-g++-posix "${cxxflags[@]}" -c "$s" -o "$obj"
             objs+=("$obj")
           done
 
-          x86_64-w64-mingw32-g++ -shared -o /tmp/t7patch-test.dll "${objs[@]}" -static \
+          x86_64-w64-mingw32-g++-posix -shared -o /tmp/t7patch-test.dll "${objs[@]}" -static \
             -lkernel32 -luser32 -ladvapi32 -lws2_32 -lshell32 -lole32 -lpsapi
+
+      - name: Verify no mingw runtime DLL imports
+        run: |
+          set -euo pipefail
+          # Nothing ships libwinpthread/libstdc++/libgcc next to the game, so importing one means the
+          # DLL fails to load. -static must absorb them (the -posix toolchain needs winpthreads).
+          bad="$(x86_64-w64-mingw32-objdump -p /tmp/t7patch-test.dll | sed -n 's/^[[:space:]]*DLL Name:[[:space:]]*//p' \
+            | grep -iE '^(libwinpthread|libstdc\+\+|libgcc)' || true)"
+          if [ -n "$bad" ]; then echo "::error::/tmp/t7patch-test.dll imports mingw runtime DLL(s): $bad"; exit 1; fi
 
       - name: Verify exported symbols
         run: |
@@ -286,8 +295,17 @@ jobs:
       - name: Compile dsound.dll (proxy)
         run: |
           set -euo pipefail
-          x86_64-w64-mingw32-g++ -std=c++20 -O2 -Wall -Wextra -Wno-cast-function-type -shared -DNDEBUG -D_WIN32_WINNT=0x0601 \
+          x86_64-w64-mingw32-g++-posix -std=c++20 -O2 -Wall -Wextra -Wno-cast-function-type -shared -DNDEBUG -D_WIN32_WINNT=0x0601 \
             -o dsound.dll dsound-proxy/dsound_proxy.cpp -static -lkernel32 -luser32
+      - name: Verify no mingw runtime DLL imports
+        run: |
+          set -euo pipefail
+          # Nothing ships libwinpthread/libstdc++/libgcc next to the game, so importing one means the
+          # DLL fails to load. -static must absorb them (the -posix toolchain needs winpthreads).
+          bad="$(x86_64-w64-mingw32-objdump -p dsound.dll | sed -n 's/^[[:space:]]*DLL Name:[[:space:]]*//p' \
+            | grep -iE '^(libwinpthread|libstdc\+\+|libgcc)' || true)"
+          if [ -n "$bad" ]; then echo "::error::dsound.dll imports mingw runtime DLL(s): $bad"; exit 1; fi
+
       - name: Verify exported symbols
         run: |
           set -euo pipefail
