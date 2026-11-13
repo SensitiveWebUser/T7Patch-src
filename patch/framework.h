@@ -314,7 +314,7 @@ inline void zbr_create_hook_checked(LPVOID target, LPVOID detour, LPVOID* origin
 // A macro only so the log carries the detour's name: #detour needs the preprocessor.
 #define CREATE_HOOK(target, detour, original) zbr_create_hook_checked((target), (detour), (original), #detour)
 #define ZBR_WINDOW_TEXT "Call of Duty: Black Ops III (community patch by serious)"
-#define ZBR_VERSION_FULL "Patch 3.09 - by serious <3"
+#define ZBR_VERSION_FULL "Patch 3.09-hardened.1 - by serious <3"
 #define SPOOF_OWNERSHIP false
 #define SPOOF_RANKED false
 #define SPOOF_UNLOCK false
