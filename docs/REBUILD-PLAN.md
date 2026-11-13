@@ -16,14 +16,21 @@
   0x200 alignment, and only IDA's reconstructed dumps round up to `0x1D75C000`. Every
   "OCR / unconfirmed triple / do not name anything after 0x6A7B6355" instruction below is void.
 - **The branch now sits on upstream.** The user reset the fork's `main` to upstream's rewritten
-  history. `rebuild/foundation-v2` = upstream `main` + the `patch/` move (no content changes) +
+  history. `rebuild/foundation` = upstream `main` + the `patch/` move (no content changes) +
   this repo's non-DLL work (dsound proxy, `dev/build`, CI, injector, `tools/`, docs).
-- **The hardening is archived, not merged.** Commit `46424cd` (the `kSupportedBuilds` gate and
-  MessageBox, `debuglog` trace log, password trimming / `ZBR_HAS_PASSWORD`, `InspectorScope`, the
-  `CheckPendingInfoRequests` bounds fix, the `g_patched` latch, the Protection `ZwContinue`
-  resolution) is **not in this tree**. It is preserved on local branch `archive/hardening-46424cd`;
-  the pre-rebase side branch is `archive/rebuild-foundation-v1`. AGENTS.md marks which of its
-  sections describe that archived code.
+- **Update 2026-11-13: the hardening was re-ported.** The fork's hardening (`46424cd`) was **re-ported on top of upstream** (2026-11-13, commits `e884edd`..`f907fbe` on
+  `rebuild/foundation`, DLL string "Patch 3.09-hardened.1"), re-derived against upstream's code
+  rather than cherry-picked. The fork stays **wire-compatible with upstream peers**. Re-ported:
+  mingw/clang portability, the `debuglog` trace log, struct-layout asserts, hook-failure reporting,
+  the unsupported-build MessageBox (now `dllmain.cpp` `ReportInstallFailure`, keyed off
+  `GameBuild.h`), the remote-input hardening including the `CheckPendingInfoRequests` fix (§8), the
+  `g_patched` latch and the install/unload/exception-handler lifecycle. **Deliberately not
+  re-ported:** `ZBR_HAS_PASSWORD` and password trimming (wire-breaking), the `canon_hash`
+  `tolower` -> `char_to_lower` change (hash must match upstream byte for byte), accepting or
+  consuming lobby messages on a prefix mismatch (worse interop), `InspectorScope` masking, resolving
+  `Protection::ZwContinue` (would arm `InspectLM`, whose frame offsets are unverified on the
+  September build; `Protection::ExceptHook` now returns early instead, §10), `T7Patch.rc` and the
+  Detours removal. The original commit is still on local branch `archive/hardening-46424cd`.
 
 **Superseded:** §0 interim advice (the build is supported), all of §2, Phase 3 evidence capture,
 Phase 4 minimal port and the porting half of Phase 5 (all done upstream), Phase 6 GameProfile
@@ -38,10 +45,9 @@ cleanup tables that describe `kSupportedBuilds`, the trace log or the hardened w
 3. `tools/` lint and CI (Phase 2), retargeted to upstream's `GameBuild.h` / pattern-scan layout.
 4. Live verification on Windows and Proton (Phase 5 Tier 1–4 checklists) of the DLL this repo
    builds.
-5. **Optional:** re-porting selected hardening from `archive/hardening-46424cd` onto upstream's
-   code. This is a separate, reviewed effort under AGENTS.md §0. The highest-value candidate is the
-   `CheckPendingInfoRequests` bounds fix, because the crash primitive it closes is live in the
-   current tree (AGENTS.md §8).
+5. ~~Re-port the hardening~~ - done 2026-11-13 (see the update above). What remains is a live
+   test of it: the lifecycle changes and the four crash sites that now recover instead of
+   freezing (0x22C965C, LuaCrash1-3) have only been compile-checked.
 
 ---
 
