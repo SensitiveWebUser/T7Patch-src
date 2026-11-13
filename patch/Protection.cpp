@@ -188,7 +188,7 @@ EXPORT void SetAutoInstallMods(bool isEnabled)
 
 EXPORT void SetPlayerName(const char* name)
 {
-    if (strlen(name) > 15)
+    if (!name || strlen(name) > 15)
     {
         return;
     }
@@ -212,7 +212,10 @@ EXPORT void SetPlayerName(const char* name)
 
 EXPORT void SetNetworkPassword(const char* pass)
 {
-    if (strlen(pass) == 0 || !(*pass))
+    // Null is "no password", the same as "". Only the null test is new: the bytes that are hashed
+    // stay exactly upstream's (no trimming), or the prefix and checksum key stop matching an
+    // upstream peer typing the same password.
+    if (!pass || strlen(pass) == 0 || !(*pass))
     {
         Protection::SetNetworkPassword(0);
     }
@@ -220,7 +223,7 @@ EXPORT void SetNetworkPassword(const char* pass)
     {
         Protection::SetNetworkPassword(GSCUHashing::canon_hash64(pass));
     }
-    ZLOG("cfg: password %s", *pass ? "SET" : "cleared");
+    ZLOG("cfg: password %s", (pass && *pass) ? "SET" : "cleared");
 }
 
 IHOOK_HEADER(IsProcessorFeaturePresent, BOOL, (DWORD processorFeature))
@@ -238,7 +241,9 @@ bool Protection::ReadP2PPacket(uintptr_t thisptr, void* pub_dest, unsigned int c
 
 	bool result = ((bool(__fastcall*)(uintptr_t, void*, unsigned int, unsigned int*, uint64_t*, int))GetOriginalSteamPtr(STEAMAPI_NETWORKING, STEAMAPI_NETWORKING_READP2PPACKET))(thisptr, pub_dest, cub_dest, cub_msg_size, steam_id_remote, n_channel);
 
-    if (result && cub_msg_size && *cub_msg_size > 5) {
+    // cub_dest as well: *cub_msg_size is the size of the peer's message, not of our buffer, so it
+    // alone does not make data[5] readable.
+    if (result && pub_dest && cub_dest > 5 && cub_msg_size && *cub_msg_size > 5) {
 
         char* data = reinterpret_cast<char*>(pub_dest);
 
@@ -275,18 +280,38 @@ const char* Protection::GetUsernamePtr(INT64 a)
 
 unsigned __int64 next_update_friendslist_time = 0;
 std::unordered_set<__int64> friends_set;
+// Callers run on more than one thread - ReadP2PPacket on Steam's networking path, the invite hooks
+// on the game's - and the refresh below used to clear() and refill the set in place while another
+// thread was inside find(). unordered_set is not safe for that; the refresh now builds a new set
+// outside the lock and swaps it in.
+SRWLOCK friends_set_lock = SRWLOCK_INIT;
+
+static bool FriendsSetContains(__int64 xuid)
+{
+    AcquireSRWLockShared(&friends_set_lock);
+    const bool found = friends_set.find(xuid) != friends_set.end();
+    ReleaseSRWLockShared(&friends_set_lock);
+    return found;
+}
+
 bool Protection::IsFriendByXUIDUncached(__int64 xuid) // ok I say its "uncached" but thats because I don't want this running a billion times per second and I think it might hitch with huge friends lists.
 {
     if (GetTickCount64() < next_update_friendslist_time || !(*(char*)OFF_s_runningUILevel)) // we will just not update the friends list in game because I really think this will hitch. STEAMAPI SUCKS
     {
-        return friends_set.find(xuid) != friends_set.end();
+        return FriendsSetContains(xuid);
     }
 
+    // Null until Steam's friends interface exists; answer from the last list rather than crash.
     auto isteamfriends = *(__int64*)STEAMAPI_FRIENDS;
+    if (!isteamfriends)
+    {
+        return FriendsSetContains(xuid);
+    }
+
     auto fn_GetFriendCount = *(__int64*)(*(__int64*)isteamfriends + 0x18);
     int num_friends = ((int(__fastcall*)(__int64, int))fn_GetFriendCount)(isteamfriends, 4);
 
-    friends_set.clear();
+    std::unordered_set<__int64> refreshed;
 
     // GetFriendByIndex must have been different in the api they used back then
     auto fn_GetFriendByIndex = *(__int64*)(*(__int64*)isteamfriends + 0x20);
@@ -296,12 +321,17 @@ bool Protection::IsFriendByXUIDUncached(__int64 xuid) // ok I say its "uncached"
         ((void(__fastcall*)(__int64, __int64&, int, int))fn_GetFriendByIndex)(isteamfriends, out_friend, i, 4);
         if (out_friend)
         {
-            friends_set.insert(out_friend);
+            refreshed.insert(out_friend);
         }
     }
 
     next_update_friendslist_time = GetTickCount64() + 30 * 1000; // once every 30 seconds
-    return friends_set.find(xuid) != friends_set.end();
+
+    AcquireSRWLockExclusive(&friends_set_lock);
+    friends_set.swap(refreshed);
+    const bool found = friends_set.find(xuid) != friends_set.end();
+    ReleaseSRWLockExclusive(&friends_set_lock);
+    return found;
 }
 
 namespace
@@ -339,6 +369,33 @@ namespace
 
 std::unordered_map<INT32, bool> installedDlcContent;
 std::unordered_map<INT32, bool> subscribedAppContent;
+// One lock for both caches and downloadProgress below. These Steam entry points are reached from
+// more than one game thread, and a first-time insert can rehash a map another thread is reading.
+// Steam itself is always called with the lock released.
+SRWLOCK dlc_cache_lock = SRWLOCK_INIT;
+
+static bool FindCachedOwnership(const std::unordered_map<INT32, bool>& cache, INT32 itemid, bool& owns)
+{
+    AcquireSRWLockShared(&dlc_cache_lock);
+    const auto entry = cache.find(itemid);
+    const bool found = entry != cache.end();
+    if (found)
+    {
+        owns = entry->second;
+    }
+    ReleaseSRWLockShared(&dlc_cache_lock);
+    return found;
+}
+
+// First answer wins, as it did when the check-then-insert was unlocked: two threads racing on the
+// same itemid both ask Steam, and whichever stores first is what every later call sees.
+static bool StoreCachedOwnership(std::unordered_map<INT32, bool>& cache, INT32 itemid, bool owns)
+{
+    AcquireSRWLockExclusive(&dlc_cache_lock);
+    const bool stored = cache.emplace(itemid, owns).first->second;
+    ReleaseSRWLockExclusive(&dlc_cache_lock);
+    return stored;
+}
 
 bool Protection::GetOwnsContent(INT64 _interface, INT32 itemid)
 {
@@ -346,13 +403,16 @@ bool Protection::GetOwnsContent(INT64 _interface, INT32 itemid)
         return IsModeContentFilePresent(itemid);
     #endif
 
-    if (installedDlcContent.find(itemid) == installedDlcContent.end())
+    bool owns = false;
+    if (FindCachedOwnership(installedDlcContent, itemid, owns))
     {
-        const auto steamReportsInstalled = ((bool(__fastcall*)(INT64, INT32))GetOriginalSteamPtr(
-            STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT))(_interface, itemid);
-        installedDlcContent[itemid] = steamReportsInstalled && IsModeContentFilePresent(itemid);
+        return owns;
     }
-    return installedDlcContent[itemid];
+
+    const auto steamReportsInstalled = ((bool(__fastcall*)(INT64, INT32))GetOriginalSteamPtr(
+        STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT))(_interface, itemid);
+    return StoreCachedOwnership(installedDlcContent, itemid,
+        steamReportsInstalled && IsModeContentFilePresent(itemid));
 }
 
 bool Protection::GetOwnsContent2(INT64 _interface, INT32 itemid)
@@ -361,12 +421,15 @@ bool Protection::GetOwnsContent2(INT64 _interface, INT32 itemid)
         return IsModeContentFilePresent(itemid);
     #endif
 
-    if (subscribedAppContent.find(itemid) == subscribedAppContent.end())
+    bool owns = false;
+    if (FindCachedOwnership(subscribedAppContent, itemid, owns))
     {
-        subscribedAppContent[itemid] = ((bool(__fastcall*)(INT64, INT32))GetOriginalSteamPtr(
-            STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT2))(_interface, itemid);
+        return owns;
     }
-    return subscribedAppContent[itemid];
+
+    return StoreCachedOwnership(subscribedAppContent, itemid,
+        ((bool(__fastcall*)(INT64, INT32))GetOriginalSteamPtr(
+            STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT2))(_interface, itemid));
 }
 
 bool Protection::IsVacBanned(INT64 a)
@@ -386,26 +449,27 @@ void Protection::GetDlcDownloadProgress(INT64 a, INT32 b, INT64* c, INT64* d)
 {
     auto now = GetTickCount64();
 
-    if (downloadProgress.find(b) != downloadProgress.end())
+    // Same cache as before - a fresh entry is served for five minutes, then refreshed from Steam -
+    // with the map only touched under dlc_cache_lock and Steam called outside it.
+    AcquireSRWLockShared(&dlc_cache_lock);
+    const auto cached = downloadProgress.find(b);
+    if (cached != downloadProgress.end() && now < cached->second.next)
     {
-        if (now >= downloadProgress[b].next)
-        {
-            downloadProgress[b].next = GetTickCount64() + (60 * 5 * 1000);
-            ((void(__fastcall*)(INT64, INT32, INT64*, INT64*))GetOriginalSteamPtr(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_GET_DLC_DOWNLOAD_PROGRESS))(a, b, c, d);
-            downloadProgress[b].a = *c;
-            downloadProgress[b].b = *d;
-            return;
-        }
-        *c = downloadProgress[b].a;
-        *d = downloadProgress[b].b;
+        *c = cached->second.a;
+        *d = cached->second.b;
+        ReleaseSRWLockShared(&dlc_cache_lock);
         return;
     }
+    ReleaseSRWLockShared(&dlc_cache_lock);
 
-    downloadProgress[b] = download_progress();
-    downloadProgress[b].next = GetTickCount64() + (60 * 5 * 1000);
     ((void(__fastcall*)(INT64, INT32, INT64*, INT64*))GetOriginalSteamPtr(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_GET_DLC_DOWNLOAD_PROGRESS))(a, b, c, d);
-    downloadProgress[b].a = *c;
-    downloadProgress[b].b = *d;
+
+    AcquireSRWLockExclusive(&dlc_cache_lock);
+    download_progress& slot = downloadProgress[b];
+    slot.next = GetTickCount64() + (60 * 5 * 1000);
+    slot.a = *c;
+    slot.b = *d;
+    ReleaseSRWLockExclusive(&dlc_cache_lock);
 }
 
 __int32 Protection::GetLobbyChatEntry(INT64 api, INT64 csteamidlobby, INT64 chatid, INT64 psteamuserid, INT64 pvdata, INT64 cubdata, INT64 chatentrytype)
@@ -430,10 +494,10 @@ __int32 Protection::GetLobbyChatEntry(INT64 api, INT64 csteamidlobby, INT64 chat
     const auto session = Protection::LobbySession_GetSession(sessionType);
     bool found_xuid = false;
 
-    for (int i = 0; i < 18; i++)
+    for (int i = 0; session && i < 18; i++)
     {
         const auto client = Protection::LobbySession_GetClientByClientNum(session, i);
-        if (client->activeClient && client->activeClient->fixedClientInfo.xuid == steamid)
+        if (client && client->activeClient && client->activeClient->fixedClientInfo.xuid == steamid)
         {
             found_xuid = true;
         }
@@ -444,11 +508,21 @@ __int32 Protection::GetLobbyChatEntry(INT64 api, INT64 csteamidlobby, INT64 chat
         return 0; // user isnt in our bo3 lobby and thus cannot chat with us
     }
 
-    if (result > 0 && *(__int32*)(chatentrytype))
+    if (result > 0 && pvdata && cubdata > 0 && chatentrytype && *(__int32*)(chatentrytype))
     {
         char* msg = (char*)pvdata;
 
-        for (int i = 0; i < strlen(msg); i++)
+        // The payload is whatever the peer sent and Steam does not terminate it, so the scan is
+        // bounded by what was actually written (and by our buffer). This loop writes, so an
+        // unterminated chat line was an out-of-bounds write, not just a read.
+        size_t limit = (size_t)result;
+        if ((size_t)cubdata < limit)
+        {
+            limit = (size_t)cubdata;
+        }
+        const int msgLen = (int)strnlen(msg, limit);
+
+        for (int i = 0; i < msgLen; i++)
         {
             if (msg[i] == '^')
             {
@@ -458,11 +532,11 @@ __int32 Protection::GetLobbyChatEntry(INT64 api, INT64 csteamidlobby, INT64 chat
             {
                 msg[i] = '.';
             }
-            else if (msg[i] == '$' && msg[i + 1] == '(')
+            else if (msg[i] == '$' && (i + 1) < msgLen && msg[i + 1] == '(')
             {
                 msg[i] = '.';
             }
-            else if (msg[i] == '[' && msg[i + 1] == '{')
+            else if (msg[i] == '[' && (i + 1) < msgLen && msg[i + 1] == '{')
             {
                 msg[i] = '.';
             }
@@ -485,9 +559,25 @@ __int64 Protection::CreateLobby(INT64 api, __int32 lobbyCreateType, __int32 maxp
     return ((__int64(__fastcall*)(INT64, INT64, INT64))GetOriginalSteamPtr(STEAMAPI_MATCHMAKING, STEAMAPI_MATCHMAKING_CREATELOBBY))(api, 1, maxplayers);
 }
 
+// s_playerData_ptr is a fixed slot in the game image, so it is always readable, but the player data
+// it points at is null before sign-in has allocated it. GetUsernameXUIDPtr runs whenever the game
+// resolves any player's name, including peers', so it must not assume the local one exists yet.
+static bool TryGetLocalXuid(__int64& out)
+{
+    const auto playerData = *(__int64**)s_playerData_ptr;
+    if (!playerData)
+    {
+        return false;
+    }
+
+    out = *playerData;
+    return true;
+}
+
 const char* Protection::GetUsernameXUIDPtr(INT64 a, INT64 b)
 {
-    if (b == **(__int64**)s_playerData_ptr)
+    __int64 localXuid = 0;
+    if (TryGetLocalXuid(localXuid) && b == localXuid)
     {
         return CustomName;
     }
@@ -533,25 +623,52 @@ void Protection::SwapSteamAPIPointer(__int64 hLibrary, int vPointerIndex, void* 
     auto OldProtection = 0ul;
     INT64* vtable = *(INT64**)steamLibrary;
 
-    if (SteamHAPIHooks.find(hLibrary) == SteamHAPIHooks.end())
+    // Recorded once per slot, never overwritten. install() records every slot before it swaps the
+    // first one (RecordSteamOriginal), so once any hook is live this map is only ever read: the
+    // hooks call GetOriginalSteamPtr on every packet and every chat line, from Steam's threads,
+    // and an insert here could rehash it underneath them. Overwriting was also wrong on its own:
+    // uninstall() passes back the original, but the slot still holds our hook when this reads it,
+    // so the map would end up naming our own function as the original.
+    auto& slots = SteamHAPIHooks[hLibrary];
+    if (slots.find(vPointerIndex) == slots.end())
     {
-        SteamHAPIHooks[hLibrary] = std::unordered_map<int, __int64>();
+        slots[vPointerIndex] = *(vtable + vPointerIndex);
     }
-
-    SteamHAPIHooks[hLibrary][vPointerIndex] = *(vtable + vPointerIndex);
 
     VirtualProtect(reinterpret_cast<void*>(vtable + vPointerIndex), 8, PAGE_EXECUTE_READWRITE, &OldProtection);
     *reinterpret_cast<void**>(vtable + vPointerIndex) = CallFuncReplace;
     VirtualProtect(reinterpret_cast<void*>(vtable + vPointerIndex), 8, OldProtection, &OldProtection);
 }
 
+// Records a slot's original without swapping it, so install() can fill the map before any hook is live.
+static void RecordSteamOriginal(__int64 hLibrary, int vPointerIndex)
+{
+    auto steamLibrary = *(INT64*)hLibrary;
+    INT64* vtable = *(INT64**)steamLibrary;
+
+    auto& slots = Protection::SteamHAPIHooks[hLibrary];
+    if (slots.find(vPointerIndex) == slots.end())
+    {
+        slots[vPointerIndex] = *(vtable + vPointerIndex);
+    }
+}
+
 INT64 Protection::GetOriginalSteamPtr(__int64 hLibrary, int vtIndex)
 {
-    if (SteamHAPIHooks.find(hLibrary) == SteamHAPIHooks.end())
+    // find() on both levels: operator[] inserts a missing slot, which allocates and can rehash the
+    // map while a hook on another thread is reading it.
+    const auto lib = SteamHAPIHooks.find(hLibrary);
+    if (lib == SteamHAPIHooks.end())
     {
         return 0;
     }
-    return SteamHAPIHooks[hLibrary][vtIndex];
+
+    const auto slot = lib->second.find(vtIndex);
+    if (slot == lib->second.end())
+    {
+        return 0;
+    }
+    return slot->second;
 }
 
 bool fs_exists(const char* filename)
@@ -631,7 +748,7 @@ struct patch_config
         outfile << "playername=" << playername << std::endl;
         outfile << "isfriendsonly=" << isfriendsonly << std::endl;
         outfile << "autoinstallmods=" << autoinstallmods << std::endl;
-        outfile << "networkpassword=" << networkpassword << std::endl;
+        outfile << "networkpassword=" << (networkpassword ? networkpassword : "") << std::endl;
         // After upstream's four keys, and only if the file being replaced had it: a fresh default
         // conf stays byte-identical to upstream's, and a debuglog=1 the user wrote is not lost.
         if (has_debuglog)
@@ -743,6 +860,9 @@ struct patch_config
             {
                 if (networkpassword)
                 {
+                    // Scrubbed before it goes back to the heap, where a crash dump would keep the
+                    // plaintext. The bytes kept below are untouched: they are what gets hashed.
+                    SecureZeroMemory(networkpassword, strlen(networkpassword));
                     free(networkpassword);
                     networkpassword = NULL;
                 }
@@ -816,7 +936,12 @@ void load_settings_initial()
 
 __int64 old_IsProcessorFeaturePresent = 0;
 
-void Protection::install()
+// Plain loads of fixed game addresses, split out so RunPatching can bind them before
+// hooks::ApplyHooks enables the detours. Those detours call through these (I_stricmp,
+// MSG_ReadData, Cbuf_AddText...) on every inbound lobby message, connectionless command and
+// menu response, and until install() ran they were null: a packet arriving in that window was
+// a call through a null pointer. install() calls it again; it only re-stores the same values.
+void Protection::bind_game_pointers()
 {
     LobbyMsgRW_PackageInt = (tLobbyMsgRW_PackageInt)PTR_LobbyMsgRW_PackageInt;
     LobbyMsgRW_PackageUChar = (tLobbyMsgRW_PackageUChar)PTR_LobbyMsgRW_PackageUChar;
@@ -861,7 +986,15 @@ void Protection::install()
     CL_GetConfigString = (tCL_GetConfigString)PTR_CL_GetConfigString;
     Cbuf_AddText = (tCbuf_AddText)PTR_Cbuf_AddText;
     I_stricmp = (tI_stricmp)PTR_I_stricmp;
-    CachedXUID = **(__int64**)s_playerData_ptr;
+}
+
+void Protection::install()
+{
+    bind_game_pointers();
+    if (!TryGetLocalXuid(CachedXUID))
+    {
+        CachedXUID = 0;
+    }
 
     SetNetworkPassword(0);
 
@@ -1002,6 +1135,18 @@ void Protection::install()
 
     oReadP2PPacket = (decltype(&ReadP2PPacket))((*(__int64*)(STEAMAPI_NETWORKING + 0x10)));
     IHOOK_INSTALL(IsProcessorFeaturePresent, GetModuleHandleA(0));
+
+    // Every original first, so the swaps below - and the hooks they make live - only ever read
+    // SteamHAPIHooks. See SwapSteamAPIPointer.
+    RecordSteamOriginal(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_GETUSERNAME);
+    RecordSteamOriginal(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_VT_NAMEBYXUID);
+    RecordSteamOriginal(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT);
+    RecordSteamOriginal(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_CHECK_OWNS_CONTENT2);
+    RecordSteamOriginal(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_IS_VAC_BANNED);
+    RecordSteamOriginal(STEAMAPI_INTERFACE, STEAMAPI_INTERFACE_GET_DLC_DOWNLOAD_PROGRESS);
+    RecordSteamOriginal(STEAMAPI_MATCHMAKING, STEAMAPI_MATCHMAKING_GETLOBBYCHATENTRY);
+    RecordSteamOriginal(STEAMAPI_MATCHMAKING, STEAMAPI_MATCHMAKING_CREATELOBBY);
+    RecordSteamOriginal(STEAMAPI_NETWORKING, STEAMAPI_NETWORKING_READP2PPACKET);
 
     SwapSteamAPIPointer(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_GETUSERNAME, (void*)GetUsernamePtr);
     SwapSteamAPIPointer(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_VT_NAMEBYXUID, (void*)GetUsernameXUIDPtr);
@@ -1690,10 +1835,41 @@ int Protection::MSG_HostHeartbeat_Inspect(char* __this, char* lobbyMsg)
     return 0;
 }
 
-bool Protection::CheckPendingInfoRequests(__int64 XUID, msg_t* _msg)
+// `message` is the raw instant-message payload, and it is still reinterpreted as a msg_t header
+// exactly as upstream does - see AGENTS.md section 8 before changing that: handing this function
+// a real msg_t makes the body below run for the first time, and it faults inside the game's
+// lobby-message parser. What changed is that the reinterpreted header is no longer trusted.
+// data, cursize and readcount are bytes the peer chose, and MSG_ReadData below copies from
+// data + readcount, so a peer could pick a small size and any address and have this read
+// wherever they liked (and a payload shorter than a msg_t over-read the receive buffer itself).
+// Now the header is only used when it describes bytes inside the payload that actually arrived.
+// Real payloads essentially never do, and for them upstream's size guard below almost always
+// failed anyway, so they get the same false; the trace line firing on most 0x68s is normal.
+bool Protection::CheckPendingInfoRequests(__int64 XUID, const char* message, unsigned int messageSize)
 {
+    if (!message || messageSize < sizeof(msg_t))
+    {
+        return false;
+    }
+
     msg_t cpyMsg;
-    memcpy(&cpyMsg, _msg, sizeof(msg_t));
+    memcpy(&cpyMsg, message, sizeof(msg_t));
+
+    const uintptr_t payloadBegin = (uintptr_t)message;
+    const uintptr_t payloadEnd = payloadBegin + messageSize;
+    const uintptr_t claimedData = (uintptr_t)cpyMsg.data;
+    const bool headerDescribesThisPayload =
+        cpyMsg.readcount <= cpyMsg.cursize
+        && cpyMsg.cursize <= messageSize
+        && claimedData >= payloadBegin
+        && claimedData <= payloadEnd
+        && payloadEnd - claimedData >= cpyMsg.cursize;
+
+    if (!headerDescribesThisPayload)
+    {
+        ZLOG("checkPending: ignored header that does not describe the payload (len=%u)", messageSize);
+        return false;
+    }
 
     unsigned int size = cpyMsg.cursize - cpyMsg.readcount;
     if (size < 2048u)
@@ -1720,12 +1896,13 @@ bool Protection::CheckPendingInfoRequests(__int64 XUID, msg_t* _msg)
                     return true;
                 }
 
-                dwInstantHandleLobbyMessage(XUID, 0, (char*)_msg);
+                dwInstantHandleLobbyMessage(XUID, 0, (char*)message);
                 return true;
             }
             else
             {
-                if (!XUID || XUID == **(__int64**)s_playerData_ptr)
+                __int64 localXuid = 0;
+                if (!XUID || (TryGetLocalXuid(localXuid) && XUID == localXuid))
                 {
                     //XLOG("KEEP LM: XUID LOCAL");
                     return false;

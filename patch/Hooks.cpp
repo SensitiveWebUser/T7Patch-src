@@ -236,9 +236,19 @@ namespace hooks {
 
 		float hkflsomeWeirdCharacterIndex(__int64 a1, int a2, int a3) {
 
-			__int64 v3; // r9
+			// The v2.04 "character index crash": a2 indexes a table the hook cannot size, so at least
+			// refuse a negative index and an entry that is not mapped, and fall through to this hook's
+			// own -1.0f rather than fault reading it.
+			if (!a1 || a2 < 0) {
+				return -1.0f;
+			}
 
-			v3 = *(DWORD64*)(a1 + 24LL * a2 + 56);
+			auto slot = (DWORD64*)(a1 + 24LL * a2 + 56);
+			if (Protection::IsBadReadPtr(slot) || Protection::IsBadReadPtr((char*)slot + 7)) {
+				return -1.0f;
+			}
+
+			__int64 v3 = *slot; // r9
 			if (v3) {
 				return flsomeWeirdCharacterIndex(a1, a2, a3);
 			}
@@ -253,10 +263,18 @@ namespace hooks {
 			auto v8 = *v7;
 			auto message = **(CHAR***)&v7[2 * v8 + 34];
 
+			// is_in_array below builds a std::string from it, which is undefined for null.
+			if (!message)
+			{
+				return 1;
+			}
+
 			// From v2.04
 			auto mode = Com_SessionMode_GetModeName();
 
-			if ((!Protection::I_stricmp(message, "requeststats") || !Protection::I_stricmp(message, "requeststats\n")) && !Protection::I_stricmp(mode, "CP"))
+			// mode can be null outside a session; test it before the comparisons rather than pass
+			// it to I_stricmp. Same accept set as before.
+			if (mode && !Protection::I_stricmp(mode, "CP") && (!Protection::I_stricmp(message, "requeststats") || !Protection::I_stricmp(message, "requeststats\n")))
 			{
 				return CL_ConnectionlessCMD(clientNum, from, msg);
 			}
@@ -273,7 +291,8 @@ namespace hooks {
 		{
 
 			constexpr auto mspreload_command = "mspreload";
-			std::vector<int> config_strings = { 3514, 3627 };
+			// static: this runs per config-string read, so do not rebuild the list every call.
+			static const std::vector<int> config_strings = { 3514, 3627 };
 
 			auto mode = Com_SessionMode_GetModeName();
 			if (mode && !Protection::I_stricmp(mode, "CP"))
@@ -283,7 +302,9 @@ namespace hooks {
 
 			if (is_in_number_array(configStringIndex, config_strings))
 			{
-				if (auto config_string{ CL_GetConfigString(configStringIndex) }; is_equal(config_string, mspreload_command, std::strlen(mspreload_command), false))
+				// Config strings are server-sent; is_equal takes std::string, so null must not reach it.
+				if (auto config_string{ CL_GetConfigString(configStringIndex) };
+					config_string && is_equal(config_string, mspreload_command, std::strlen(mspreload_command), false))
 				{
 					// Loadside attempt caught, return empty string to prevent crash
 					CL_StoreConfigString(configStringIndex, "");
@@ -395,9 +416,16 @@ namespace hooks {
 
 		bool hkUI_DoModelStringReplacement(__int32 controllerIndex, char* element, const char* source, char* dest, unsigned int destSize)
 		{
+			if (!dest || !destSize)
+			{
+				return false;
+			}
+
+			// Truncating copies. strcpy_s with a source that does not fit is not a truncation, it is
+			// the invalid-parameter handler, which fast-fails the process past our own exception
+			// handler - and model strings carry peer-supplied text (names, chat).
 			char input[4096]{};
-			strcpy_s(input, source);
-			input[4095] = 0;
+			strncpy_s(input, sizeof(input), source ? source : "", _TRUNCATE);
 			int max = strlen(input);
 
 			bool b_replace = false;
@@ -436,8 +464,7 @@ namespace hooks {
 
 			if (b_replace)
 			{
-				strcpy_s(dest, destSize, input);
-				*(dest + destSize - 1) = 0;
+				strncpy_s(dest, destSize, input, _TRUNCATE);
 				return true;
 			}
 
@@ -477,7 +504,14 @@ namespace hooks {
 				else
 				{
 					// check if the last time we updated the private password was within the past second
-					if (GetTickCount64() <= Protection::PrivatePassword[2] + 1500)
+					//
+					// Only when there was a previous password. With none, PrivatePassword[0] is 0 and
+					// this "previous key" is the unkeyed checksum, so for 1.5s after a password is set
+					// (including at every launch, where install() clears it first) a peer with no
+					// password, or no patch, was accepted. Receive-side only: what we send, and the
+					// keys checked for a peer who does have a password, are unchanged.
+					if (Protection::PrivatePassword[0] != 0
+						&& GetTickCount64() <= Protection::PrivatePassword[2] + 1500)
 					{
 						checksum = checksum ^ (unsigned __int16)Protection::PrivatePassword[1] ^ (unsigned __int16)Protection::PrivatePassword[0];
 						if (*(unsigned __int16*)(newLen + payload) == (unsigned __int16)checksum)
@@ -519,7 +553,12 @@ namespace hooks {
 			{
 				return Live_SystemInfo(controllerIndex, infoType, outputString, outputLen);
 			}
-			strcpy_s(outputString, outputLen, ZBR_VERSION_FULL);
+			if (!outputString || outputLen <= 0)
+			{
+				return false;
+			}
+
+			strncpy_s(outputString, outputLen, ZBR_VERSION_FULL, _TRUNCATE);
 			return true;
 		}
 
@@ -542,31 +581,52 @@ namespace hooks {
 				packetType = MSG_ReadByte(&msg);
 			}
 
-			char* msgData = *(char**)(message + 8);
-			__int32 msgSize = *(__int32*)(message + 0x1C);
-			__int32 msgRead = *(__int32*)(message + 0x24);
-			const auto remainingSize = msgSize - msgRead;
-
 			// check packet for the following cases:
 			if (packetType == 0x65 || packetType == 0x6D) // cbuf
 			{
 				is_valid_packet = false;
 			}
 			else if (packetType == 0x66) // is a joinRequest
-			{		
-				if ((msgSize - msgRead) != 0x64) // has a bad message size which leads to error message
+			{
+				// These three are read from the raw payload as if it began with a msg_t, as upstream
+				// reads them: they are bytes the peer chose, msgData included. The test is kept, but
+				// nothing is read unless it lies inside the payload that arrived. Upstream instead
+				// dereferenced msgData + msgRead wherever it pointed - a remote crash, or a read of
+				// our memory - and read the header past the end of a short payload. A payload whose
+				// bytes point inside itself needs the receive buffer's address, which a peer does
+				// not have, so in practice every 0x66 here is dropped, as ReadP2PPacket already
+				// drops type 102 (0x66) on the Steam route.
+				if (messageSize < sizeof(msg_t))
 				{
 					is_valid_packet = false;
 				}
-
-				char* packetData = msgData + msgRead;
-				if (is_valid_packet && !*(__int32*)packetData) // msg_type_join_request which leads to crash
+				else
 				{
-					is_valid_packet = false;
+					char* msgData = *(char**)(message + 8);
+					__int32 msgSize = *(__int32*)(message + 0x1C);
+					__int32 msgRead = *(__int32*)(message + 0x24);
+
+					if ((msgSize - msgRead) != 0x64) // has a bad message size which leads to error message
+					{
+						is_valid_packet = false;
+					}
+
+					const uintptr_t payloadBegin = (uintptr_t)message;
+					const uintptr_t payloadEnd = payloadBegin + messageSize;
+					const uintptr_t packetData = (uintptr_t)msgData + (uintptr_t)(intptr_t)msgRead;
+					if (is_valid_packet && (packetData < payloadBegin || packetData > payloadEnd - sizeof(__int32)))
+					{
+						is_valid_packet = false;
+					}
+
+					if (is_valid_packet && !*(__int32*)packetData) // msg_type_join_request which leads to crash
+					{
+						is_valid_packet = false;
+					}
 				}
 			}
 
-			if (is_valid_packet && (packetType == 0x68) && Protection::CheckPendingInfoRequests(senderXuid, (msg_t*)message))
+			if (is_valid_packet && (packetType == 0x68) && Protection::CheckPendingInfoRequests(senderXuid, message, messageSize))
 			{
 				return 0;
 			}
@@ -745,7 +805,10 @@ namespace hooks {
 				}
 				else
 				{
-					strcpy_s(szMenuName, BG_Cache_GetScriptMenuNameForIndex(0, menuIndex));
+					// Truncating, null-safe copy: strcpy_s on an over-long or null name is the
+					// invalid-parameter handler, a fast-fail past our exception handler.
+					const char* menuName = BG_Cache_GetScriptMenuNameForIndex(0, menuIndex);
+					strncpy_s(szMenuName, sizeof(szMenuName), menuName ? menuName : "", _TRUNCATE);
 				}
 
 				SV_Cmd_ArgvBuffer(3, mres, 1024);
@@ -827,11 +890,26 @@ namespace hooks {
 				}
 				else
 				{
-					strcpy_s(szMenuName, BG_Cache_GetScriptMenuNameForIndex(0, menuIndex));
+					// Truncating, null-safe copy: strcpy_s on an over-long or null name is the
+					// invalid-parameter handler, a fast-fail past our exception handler.
+					const char* menuName = BG_Cache_GetScriptMenuNameForIndex(0, menuIndex);
+					strncpy_s(szMenuName, sizeof(szMenuName), menuName ? menuName : "", _TRUNCATE);
 				}
 				SV_Cmd_ArgvBuffer(3, mres, 1024);
 				auto eventIndex = (unsigned int)atoi(mres);
-				strcpy_s(mres, BG_Cache_GetEventStringNameForIndex(0, eventIndex));
+				// eventIndex is a number a client sent us, and nothing checked it before it indexed
+				// the event-string table. 256 is the bound upstream's own (disabled)
+				// hkBG_Cache_GetEventStringNameForIndex uses; "bad" is the sentinel this function
+				// already substitutes for unusable input.
+				if (eventIndex >= 256u)
+				{
+					strcpy_s(mres, "bad");
+				}
+				else
+				{
+					const char* eventName = BG_Cache_GetEventStringNameForIndex(0, eventIndex);
+					strncpy_s(mres, sizeof(mres), eventName ? eventName : "", _TRUNCATE);
+				}
 			}
 
 			if (!Protection::I_stricmp(mres, "badspawn"))

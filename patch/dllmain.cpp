@@ -593,6 +593,10 @@ void RunPatching()
     // Apply VMP Hooks
     hooks::ApplyVMTHooks();
 
+    // Before the detours go live: they call through these pointers, which install() below would
+    // otherwise only bind after them. See Protection::bind_game_pointers.
+    Protection::bind_game_pointers();
+
 	// Apply MinHook hooks
 	hooks::ApplyHooks();
 
