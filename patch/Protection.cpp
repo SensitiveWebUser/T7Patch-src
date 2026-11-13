@@ -4,6 +4,12 @@ bool has_set_window_text = false;
 bool Protection::IsFriendsOnly = false;
 bool Protection::IsAutoInstallModsEnabled = false;
 bool Protection::IsInjectorlessInstall = true;
+bool Protection::Installed = false;
+std::atomic<bool> Protection::Unloading{ false };
+bool Protection::ExceptionHookInstalled = false;
+void* Protection::MainThreadHandle = nullptr;
+unsigned int Protection::UninstallIatRestoreFailures = 0;
+unsigned int Protection::UninstallVtableProtectFailures = 0;
 __int64 Protection::PrivatePassword[3] = { 0, 0 };
 char Protection::CustomName[16] = { 0 };
 std::unordered_map<BYTE, std::function<void(__int32* lobbyMsgTypePtr, __int64 lobbyMsg)>> Protection::handle_packet_callbacks;
@@ -619,6 +625,15 @@ bool Protection::IsBadReadPtr(void* p)
 std::unordered_map<__int64, std::unordered_map<int, __int64>> Protection::SteamHAPIHooks;
 void Protection::SwapSteamAPIPointer(__int64 hLibrary, int vPointerIndex, void* CallFuncReplace)
 {
+    // Only uninstall() can pass null: GetOriginalSteamPtr for a slot that was never recorded.
+    // Writing it would put 0 into a live Steam vtable. There is deliberately no matching guard on
+    // the Steam globals below: if Steam is not up, install() faults here as upstream always has,
+    // rather than carrying on with ReadP2PPacket and the friends-only gate silently absent.
+    if (!CallFuncReplace)
+    {
+        return;
+    }
+
     auto steamLibrary = *(INT64*)hLibrary;
     auto OldProtection = 0ul;
     INT64* vtable = *(INT64**)steamLibrary;
@@ -635,7 +650,22 @@ void Protection::SwapSteamAPIPointer(__int64 hLibrary, int vPointerIndex, void* 
         slots[vPointerIndex] = *(vtable + vPointerIndex);
     }
 
-    VirtualProtect(reinterpret_cast<void*>(vtable + vPointerIndex), 8, PAGE_EXECUTE_READWRITE, &OldProtection);
+    if (!VirtualProtect(reinterpret_cast<void*>(vtable + vPointerIndex), 8, PAGE_EXECUTE_READWRITE, &OldProtection))
+    {
+        if (Protection::Unloading.load())
+        {
+            // Every other thread is suspended (see Unload), so count rather than log, and leave the
+            // slot alone rather than fault inside the teardown.
+            ++Protection::UninstallVtableProtectFailures;
+            return;
+        }
+
+        // On install the write below still happens, as it always has. Skipping it would leave this
+        // slot unhooked with nothing but a trace line to show for it; writing either works (the
+        // page was already writable) or faults at startup, where it is seen.
+        ZLOG("steam: VirtualProtect failed for vtable slot %d (err=%lu)", vPointerIndex, GetLastError());
+    }
+
     *reinterpret_cast<void**>(vtable + vPointerIndex) = CallFuncReplace;
     VirtualProtect(reinterpret_cast<void*>(vtable + vPointerIndex), 8, OldProtection, &OldProtection);
 }
@@ -910,6 +940,21 @@ DWORD WINAPI MainThread(LPVOID lpParam)
     for (;;)
     {
         arxan_bypass::maintain();
+
+        // After Unload() the config is no longer applied: apply_settings writes the name into game
+        // memory and the password into state uninstall() has just reset. The thread only exits once
+        // maintain() has done its one re-apply, though. Unload() does not revert the Arxan patches,
+        // so the game still needs it, and upstream's watcher never exited at all.
+        if (Protection::Unloading.load())
+        {
+            if (!arxan_bypass::maintenance_pending())
+            {
+                break;
+            }
+            Sleep(1000);
+            continue;
+        }
+
         if (user_config.update_watcher_time(PATCH_CONFIG_LOCATION))
         {
             user_config.loadfrom(PATCH_CONFIG_LOCATION);
@@ -990,6 +1035,13 @@ void Protection::bind_game_pointers()
 
 void Protection::install()
 {
+    // RunPatching's latch already stops a second call; this keeps install() itself from re-recording
+    // Old_lobbymsgprints as the sentinel and re-running the one-shot game calls below.
+    if (Protection::Installed)
+    {
+        return;
+    }
+
     bind_game_pointers();
     if (!TryGetLocalXuid(CachedXUID))
     {
@@ -1260,8 +1312,18 @@ void Protection::install()
             }
         };
 
-    Protection::Old_lobbymsgprints = *(__int64*)PTR_lobbymsgprints;
-    *(__int64*)PTR_lobbymsgprints = 0xFFEEDDCC44332212;
+    // The sentinel is a deliberately invalid call target that only the exception hook can catch.
+    // With no hook installed (InstallHook did not recognise or could not verify the dispatcher),
+    // arming it would turn the first call through lobbymsgprints into an unhandled crash.
+    if (Protection::ExceptionHookInstalled)
+    {
+        Protection::Old_lobbymsgprints = *(__int64*)PTR_lobbymsgprints;
+        *(__int64*)PTR_lobbymsgprints = 0xFFEEDDCC44332212;
+    }
+    else
+    {
+        ZLOG("install: exception hook not installed, lobbymsgprints sentinel left unarmed");
+    }
     Protection::CachedRetnAddy = PTR_saveLobbyMsgExceptAddy;
 
     // Call create lobby again
@@ -1284,21 +1346,42 @@ void Protection::install()
     if (IsInjectorlessInstall)
     {
         load_settings_initial();
-        CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
+        // Handle retained so Unload() can wait for the watcher; see Protection::MainThreadHandle.
+        Protection::MainThreadHandle = CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
     }
 
     ZLOG("session: %s | route=%s | name=\"%s\" | friendsOnly=%d | autoInstallMods=%d | password=%s",
         ZBR_VERSION_FULL, Protection::IsInjectorlessInstall ? "injectorless" : "injector",
         Protection::CustomName, (int)Protection::IsFriendsOnly, (int)Protection::IsAutoInstallModsEnabled,
         ZBR_PREFIX_BYTE ? "set" : "none");
+    Protection::Installed = true;
 }
 
+// Runs from Unload() with every other thread suspended: nothing here may allocate or log.
 void Protection::uninstall()
 {
-    *(__int64*)PTR_lobbymsgprints = Protection::Old_lobbymsgprints;
-    SetNetworkPassword(0);
-    Iat_hook_::detour_iat_ptr("IsProcessorFeaturePresent", (void*)old_IsProcessorFeaturePresent);
+    if (!Protection::Installed)
+    {
+        return;
+    }
+    Protection::Installed = false;
+    Protection::Unloading.store(true);
 
+    // Only if install() armed it: otherwise Old_lobbymsgprints is still 0, and writing it would
+    // replace a live game pointer with null.
+    if (*(__int64*)PTR_lobbymsgprints == (__int64)0xFFEEDDCC44332212)
+    {
+        *(__int64*)PTR_lobbymsgprints = Protection::Old_lobbymsgprints;
+    }
+    SetNetworkPassword(0);
+    // 0 means the IAT slot was not restored and still points into this module.
+    if (!Iat_hook_::detour_iat_ptr("IsProcessorFeaturePresent", (void*)old_IsProcessorFeaturePresent))
+    {
+        ++Protection::UninstallIatRestoreFailures;
+    }
+
+    // Each original here is the one recorded before the first swap: SwapSteamAPIPointer never
+    // overwrites a recorded slot, so restoring cannot record our own hook as the "original".
     SwapSteamAPIPointer(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_GETUSERNAME, (void*)GetOriginalSteamPtr(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_GETUSERNAME));
     SwapSteamAPIPointer(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_VT_NAMEBYXUID, (void*)GetOriginalSteamPtr(STEAMAPI_STEAMUSER, STEAMAPI_STEAMUSER_VT_NAMEBYXUID));
 
@@ -2010,6 +2093,26 @@ int Protection::MSG_InfoResponseSafe(Msg_InfoResponse* infoResponse, LobbyMsg* l
 
 void Protection::ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
 {
+    // Protection::ZwContinue is NULL and nothing assigns it, as in every release up to 3.04
+    // (AGENTS.md §10). Every branch below ends by calling through it, so reaching any of them used
+    // to fault again at RIP 0 inside this handler - the "RIP 0x0" crashes.log entry. Returning
+    // instead hands the fault back to dllmain.cpp's ExceptHook, which uses its own resolved
+    // ZwContinue: it has identical handlers for 0x22C965C and LuaCrash1-3, and everything else
+    // here (0x22C9676, the sentinel) reaches its crash-log path at the real fault address.
+    //
+    // That also means InspectLM no longer runs. It used to, just before the null call, and its
+    // result never mattered because the process stopped either way. Do NOT "fix" this by
+    // resolving ZwContinue: the game would then resume with whatever InspectLM did. It finds the
+    // lobby message through hardcoded stack-frame offsets (Rsp+0x20/+0x28/+0x30, then +0xB0 and
+    // +0x88-0x58) that are BlackOps3.exe's compiler frame layout, and writes 0xFF through one of
+    // them. Nothing pins those offsets and they have not been verified on either supported build;
+    // wrong ones would make a peer-reachable fault a stack write the game keeps running on.
+    // InspectLM stays unarmed until its offsets are verified on both builds.
+    if (!ZwContinue)
+    {
+        return;
+    }
+
     if ((INT64)ContextRecord->Rcx == 0xFFEEDDCC44332212)
     {
         InspectLM(ExceptionRecord, ContextRecord);
@@ -2074,13 +2177,29 @@ namespace Iat_hook_
         if (!module)
             module = GetModuleHandle(0);
 
+        if (!module || !function)
+            return 0;
+
         PIMAGE_DOS_HEADER img_dos_headers = (PIMAGE_DOS_HEADER)module;
-        PIMAGE_NT_HEADERS img_nt_headers = (PIMAGE_NT_HEADERS)((BYTE*)img_dos_headers + img_dos_headers->e_lfanew);
-        PIMAGE_IMPORT_DESCRIPTOR img_import_desc = (PIMAGE_IMPORT_DESCRIPTOR)((BYTE*)img_dos_headers + img_nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
         if (img_dos_headers->e_magic != IMAGE_DOS_SIGNATURE)
-            printf("\n");
+            return 0;
+
+        PIMAGE_NT_HEADERS img_nt_headers = (PIMAGE_NT_HEADERS)((BYTE*)img_dos_headers + img_dos_headers->e_lfanew);
+        if (img_nt_headers->Signature != IMAGE_NT_SIGNATURE)
+            return 0;
+
+        const auto importDirRva = img_nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+        if (!importDirRva)
+            return 0;
+
+        PIMAGE_IMPORT_DESCRIPTOR img_import_desc = (PIMAGE_IMPORT_DESCRIPTOR)((BYTE*)img_dos_headers + importDirRva);
 
         for (IMAGE_IMPORT_DESCRIPTOR* iid = img_import_desc; iid->Name != 0; iid++) {
+            // A bound descriptor can have no name array; without this the module base is read as
+            // a thunk array.
+            if (!iid->OriginalFirstThunk || !iid->FirstThunk)
+                continue;
+
             for (int func_idx = 0; *(func_idx + (void**)(iid->FirstThunk + (size_t)module)) != nullptr; func_idx++) {
                 char* mod_func_name = (char*)(*(func_idx + (size_t*)(iid->OriginalFirstThunk + (size_t)module)) + (size_t)module + 2);
                 const intptr_t nmod_func_name = (intptr_t)mod_func_name;
@@ -2098,11 +2217,14 @@ namespace Iat_hook_
     uintptr_t detour_iat_ptr(const char* function, void* newfunction, HMODULE module)
     {
         auto&& func_ptr = find(function, module);
-        if (*func_ptr == newfunction || *func_ptr == nullptr)
+        // find() returns 0 for a function the module does not import; this dereferenced it.
+        if (!func_ptr || *func_ptr == newfunction || *func_ptr == nullptr)
             return 0;
 
         DWORD old_rights, new_rights = PAGE_READWRITE;
-        VirtualProtect(func_ptr, sizeof(uintptr_t), new_rights, &old_rights);
+        if (!VirtualProtect(func_ptr, sizeof(uintptr_t), new_rights, &old_rights))
+            return 0;
+
         uintptr_t ret = (uintptr_t)*func_ptr;
         *func_ptr = newfunction;
         VirtualProtect(func_ptr, sizeof(uintptr_t), old_rights, &new_rights);

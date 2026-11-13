@@ -311,6 +311,13 @@ namespace arxan_bypass
         g_waitingForReadySignal.store(false, std::memory_order_release);
     }
 
+    bool maintenance_pending()
+    {
+        return g_active.load(std::memory_order_acquire) &&
+            !g_external.load(std::memory_order_acquire) &&
+            g_waitingForReadySignal.load(std::memory_order_acquire);
+    }
+
     bool active()
     {
         return g_active.load(std::memory_order_acquire);

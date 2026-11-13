@@ -1110,6 +1110,10 @@ namespace hooks {
 
 	}
 
+	uintptr_t* g_lobbyVptrSlot = nullptr;
+	uintptr_t g_origLobbyVtable = 0;
+	uintptr_t g_lobbyVtableCopy = 0;
+
 	void ApplyVMTHooks()
 	{
 
@@ -1121,9 +1125,39 @@ namespace hooks {
 			vtable_buf[count] = vmt[count];
 		}
 
+		// Recorded so Unload() can point the object back at the game's own table.
+		g_lobbyVptrSlot = *(uintptr_t**)(ptr + 1384);
+		g_origLobbyVtable = (uintptr_t)vmt;
+		g_lobbyVtableCopy = (uintptr_t)vtable_buf;
+
 		**(uintptr_t**)(ptr + 1384) = (uintptr_t)vtable_buf;
 		*(uintptr_t*)(**(uintptr_t**)(ptr + 1384) + 192) = (uintptr_t)functions::Global_InstantMessage;
 
+	}
+
+	// Without this, unloading leaves the lobby object dispatching slot 24 through a copied table
+	// whose entry is Global_InstantMessage in this module. Allocation-free and lock-free, so it is
+	// safe in Unload()'s suspended window. The slot is in the game's heap object, not its read-only
+	// image, so it needs no VirtualProtect (ApplyVMTHooks writes it the same way).
+	void RemoveVMTHooks()
+	{
+		if (!g_lobbyVptrSlot || !g_origLobbyVtable)
+		{
+			return;
+		}
+
+		// Only if it still holds our copy: if the game has rebuilt the object since, the slot is
+		// no longer ours to write.
+		if (*g_lobbyVptrSlot == g_lobbyVtableCopy)
+		{
+			*g_lobbyVptrSlot = g_origLobbyVtable;
+		}
+
+		// The copy is leaked deliberately: 400 bytes once per process, and another thread may still
+		// be inside a call dispatched through it.
+		g_lobbyVptrSlot = nullptr;
+		g_origLobbyVtable = 0;
+		g_lobbyVtableCopy = 0;
 	}
 
 	void ApplyMemoryPatches()
@@ -1229,9 +1263,16 @@ namespace hooks {
 		}
 	}
 
+	// Disables every MinHook detour, which includes campaign_fixes' and lua_symbols' (both install
+	// through CREATE_HOOK into the same MinHook instance). Disable, not remove: MH_RemoveHook frees
+	// the trampolines, and a thread can still be returning through one.
 	void DestroyHooks()
 	{
-		MH_DisableHook(MH_ALL_HOOKS);
+		const MH_STATUS disableStatus = MH_DisableHook(MH_ALL_HOOKS);
+		if (disableStatus != MH_OK)
+		{
+			ZLOG("hook: MH_DisableHook FAILED (MH_STATUS=%d) - detours may still be live", (int)disableStatus);
+		}
 	}
 
 }

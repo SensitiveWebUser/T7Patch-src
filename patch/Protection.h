@@ -65,6 +65,20 @@ public:
 	static bool IsFriendsOnly;
 	static bool IsAutoInstallModsEnabled;
 	static bool IsInjectorlessInstall;
+	// Lifecycle state. Installed is set as install()'s last step and makes uninstall() a no-op
+	// before then, so an Unload() that reaches it without a completed install cannot write 0 over
+	// live game and Steam pointers. Unloading is read by the config watcher on its own thread.
+	static bool Installed;
+	static std::atomic<bool> Unloading;
+	// Whether dllmain.cpp's InstallHook verified its KiUserExceptionDispatcher write. install()
+	// only arms the lobbymsgprints sentinel when it did.
+	static bool ExceptionHookInstalled;
+	// The config watcher (MainThread), retained so Unload() can wait for it to leave the module.
+	static void* MainThreadHandle;
+	// Counted rather than logged: uninstall() runs with every other thread suspended, and the
+	// trace log takes a lock one of them may hold. Unload() reports them after the resume.
+	static unsigned int UninstallIatRestoreFailures;
+	static unsigned int UninstallVtableProtectFailures;
 
 	static void bind_game_pointers();
 	static void install();
@@ -94,6 +108,7 @@ public:
 	static int MSG_InfoResponseSafe(Msg_InfoResponse* infoResponse, LobbyMsg* lm);
 	static void SetNetworkPassword(__int64 pass);
 
+	// Deliberately left NULL - see Protection::ExceptHook and AGENTS.md §10 before assigning it.
 	static tZwContinue ZwContinue;
 	static tI_stricmp I_stricmp;
 	static char* UILocalizeDefaultText;

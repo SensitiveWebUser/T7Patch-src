@@ -8,14 +8,28 @@ void SuspendProcess()
     NtSuspendProcess pfnNtSuspendProcess = (NtSuspendProcess)GetProcAddress(
         GetModuleHandleA("ntdll"), "NtSuspendProcess");
 
-    pfnNtSuspendProcess(processHandle);
-    CloseHandle(processHandle);
+    // Both looked up rather than assumed: this runs from the crash handler, where a call through a
+    // null pointer is a second fault inside the first.
+    if (pfnNtSuspendProcess && processHandle)
+    {
+        pfnNtSuspendProcess(processHandle);
+    }
+
+    if (processHandle)
+    {
+        CloseHandle(processHandle);
+    }
 }
 
 typedef unsigned long long(__fastcall* ZwContinue_t)(PCONTEXT ThreadContext, BOOLEAN RaiseAlert);
 ZwContinue_t ZwContinue = reinterpret_cast<ZwContinue_t>(GetProcAddress(GetModuleHandleA("ntdll.dll"), "ZwContinue"));
 
-char* UILocalizeDefaultText = NULL;
+// Static rather than malloc'd on first use: the LuaCrash2/3 handlers below hand this to the game
+// from inside the exception handler, where the faulting thread may hold the heap lock. They are
+// live now that Protection::ExceptHook no longer pre-empts them (see there); the lazy malloc
+// blocks are left in place and simply never run.
+static char g_uiLocalizeDefaultStorage[4] = "";
+char* UILocalizeDefaultText = g_uiLocalizeDefaultStorage;
 
 struct debug_msg_info
 {
@@ -27,10 +41,13 @@ std::unordered_map<INT64, CONTEXT> SavedExceptions;
 std::unordered_map<DWORD, bool> EncounteredIPs;
 std::unordered_map<DWORD, debug_msg_info> PrevErrors;
 #define DMSG_COOLDOWN_TICKS 5000
-DWORD lck_dumping = NULL;
+// Thread id of the crash-dump writer, claimed with an interlocked compare so two threads faulting
+// at once cannot both write crashes.log or both walk SavedExceptions.
+volatile LONG g_crashDumpOwnerTid = 0;
 char error_msg_buff[1024];
 const char clientfield_doesnt_exist[] = "Clientfield does not exist";
-bool is_unhooking = false;
+// Set by Unload() on its own thread, read by ExceptHook on whichever thread faults.
+std::atomic<bool> is_unhooking{ false };
 
 void __nullsub()
 {
@@ -40,11 +57,11 @@ void __nullsub()
 void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
 {
 
-    if (is_unhooking)
+    if (is_unhooking.load())
     {
         ContextRecord->Dr7 = 0;
         ContextRecord->Rip = ROP_RETN;
-        is_unhooking = false;
+        is_unhooking.store(false);
         ZwContinue(ContextRecord, false);
     }
 
@@ -270,20 +287,21 @@ void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
     }
 
     INT64 faultingModule = 0;
-    char module_name[MAX_PATH];
+    char module_name[MAX_PATH] = "<Unknown Module>";
 
     bool b_fatal = false;
     if ((ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) || (ExceptionRecord->ExceptionFlags & EXCEPTION_NONCONTINUABLE)/* || (strstr(module_name, "blackops3.exe") && STATUS_ILLEGAL_INSTRUCTION == ExceptionRecord->ExceptionCode)*/)
     {
-        if (lck_dumping)
+        const LONG self = (LONG)GetCurrentThreadId();
+        if (InterlockedCompareExchange(&g_crashDumpOwnerTid, self, 0) != 0)
         {
-            INT64 addy = (INT64)ExceptionRecord->ExceptionAddress;
-            SavedExceptions[addy] = *ContextRecord;
+            // Deliberately records nothing. Upstream inserted this context into SavedExceptions,
+            // but the owning thread is iterating that map and erasing as it goes: an insert from
+            // here rehashes it under that iterator, an unsynchronised write that corrupts the heap.
+            // No lock is usable on a path entered from an arbitrary faulting thread.
         }
         else
         {
-            lck_dumping = GetCurrentThreadId();
-
             FILE* f;
             f = fopen(CRASH_LOG_NAME, "a+"); // a+ (create + append)
             if (!f)
@@ -295,8 +313,13 @@ void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
                 ExitProcess(-444);
             }
 
-            //ALOG("Crash log %p\n\n", time(NULL));
-            fprintf(f, "Crash log %p\n\n", time(NULL));
+            // Stamp the version so a report can be attributed to a release, and say plainly what the
+            // stack dump below is: raw process memory, which can hold player names, Steam IDs and
+            // session keys. Whoever is asked to attach this file should know that before posting it.
+            fprintf(f, "%s\nCrash log %p\n\n"
+                "NOTE: the [address] lines below are raw stack memory. They may contain player\n"
+                "names, Steam IDs and session data. Review before posting this file publicly.\n\n",
+                ZBR_VERSION_FULL, time(NULL));
             INT64 addy = (INT64)ExceptionRecord->ExceptionAddress;
             SavedExceptions[addy] = *ContextRecord;
             while (SavedExceptions.size())
@@ -305,7 +328,10 @@ void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
                 RtlPcToFileHeader((PVOID)kvp.first, (PVOID*)&faultingModule);
                 if (faultingModule)
                 {
-                    GetModuleFileNameA((HMODULE)faultingModule, module_name, MAX_PATH);
+                    if (!GetModuleFileNameA((HMODULE)faultingModule, module_name, MAX_PATH))
+                    {
+                        strcpy_s(module_name, "<Unknown Module>");
+                    }
                 }
                 else
                 {
@@ -338,6 +364,15 @@ void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
 
                 for (int i = 0; i < ((STATUS_ILLEGAL_INSTRUCTION == ExceptionRecord->ExceptionCode) ? 0x1200 : 0x400); i += 0x10)
                 {
+                    // A fault near the top of a stack, or with a corrupted Rsp, would otherwise fault
+                    // again here, inside the handler, and lose the entry being written.
+                    if (Protection::IsBadReadPtr((void*)(kvp.second.Rsp + i))
+                        || Protection::IsBadReadPtr((void*)(kvp.second.Rsp + i + 8)))
+                    {
+                        fprintf(f, "[%p] <unreadable, stack dump truncated>\n", (void*)(kvp.second.Rsp + i));
+                        break;
+                    }
+
                     //ALOG("[%p] %p %p\n", kvp.second.Rsp + i, *(int64_t*)(kvp.second.Rsp + i), *(int64_t*)(kvp.second.Rsp + i + 8));
                     fprintf(f, "[%p] %p %p\n\n\n", kvp.second.Rsp + i, *(int64_t*)(kvp.second.Rsp + i), *(int64_t*)(kvp.second.Rsp + i + 8));
                 }
@@ -349,7 +384,7 @@ void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
 
             std::fflush(f);
             std::fclose(f);
-            lck_dumping = NULL;
+            g_crashDumpOwnerTid = 0;
         }
 
         if (STATUS_ILLEGAL_INSTRUCTION != ExceptionRecord->ExceptionCode)
@@ -360,12 +395,21 @@ void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
 
     if (b_fatal)
     {
-        if (lck_dumping && lck_dumping != GetCurrentThreadId())
+        const LONG dumpOwner = g_crashDumpOwnerTid;
+        if (dumpOwner && dumpOwner != (LONG)GetCurrentThreadId())
         {
+            // Park this thread while the owner writes the log. With no handle, resuming into
+            // SuspendThread(NULL) would fail and "return" to whatever is on top of the faulting
+            // stack, so fall back to suspending the process instead.
             HANDLE hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, GetCurrentThreadId());
-            ContextRecord->Rip = (INT64)SuspendThread;
-            ContextRecord->Rcx = (INT64)hThread;
-            ZwContinue(ContextRecord, false);
+            if (hThread)
+            {
+                ContextRecord->Rip = (INT64)SuspendThread;
+                ContextRecord->Rcx = (INT64)hThread;
+                ZwContinue(ContextRecord, false);
+            }
+
+            SuspendProcess();
         }
         else
         {
@@ -374,11 +418,19 @@ void ExceptHook(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT ContextRecord)
     }
 }
 
-__int64 __fn_ptr_hook = 0;
+__int64 g_exceptionDispatchSlot = 0;
+void* g_exceptionDispatchOriginal = nullptr;
+bool wine_hook_installed = false;
+// Cached at install so UninstallHook need not look ntdll up by name: that takes the loader lock,
+// and UninstallHook runs with every other thread suspended.
+__int64 g_kiUserExceptionDispatcher = 0;
+// Counted, not logged, for the same reason; Unload() reports it after the resume.
+unsigned int g_uninstallHookProtectFailures = 0;
+
 #define HOOK_SIZE_WINE 0x1B
 unsigned __int8 old_data[HOOK_SIZE_WINE];
 unsigned __int8 new_data[HOOK_SIZE_WINE] = { 0x48, 0xB8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x48, 0x89, 0xE2, 0x48, 0x8D, 0x8C, 0x24, 0xF0, 0x04, 0x00, 0x00, 0xFF, 0xD0, 0x90, 0x90, 0x90, 0x90 };
-void wine_installhook(void* func, __int64 kiuserexceptiondispatcher)
+bool wine_installhook(void* func, __int64 kiuserexceptiondispatcher)
 {
     // We have 0x1A (26 bytes) of space to work with. we need to mov rdx, rsp and lea rcx, [rsp+arg_4E8], then mov rax, call and call rax
     auto begin_write = kiuserexceptiondispatcher + 0xB;
@@ -391,9 +443,29 @@ void wine_installhook(void* func, __int64 kiuserexceptiondispatcher)
     *(__int64*)(new_data + 2) = addy;
 
     auto OldProtection = 0ul;
-    VirtualProtect(reinterpret_cast<void*>(begin_write), HOOK_SIZE_WINE, PAGE_EXECUTE_READWRITE, &OldProtection);
+    if (!VirtualProtect(reinterpret_cast<void*>(begin_write), HOOK_SIZE_WINE, PAGE_EXECUTE_READWRITE, &OldProtection))
+    {
+        ZLOG("installHook: wine VirtualProtect failed (err=%lu)", GetLastError());
+        return false;
+    }
+
     memcpy((void*)begin_write, new_data, HOOK_SIZE_WINE);
+
+    // Read back before dropping write access, so a write that did not take is rolled back here
+    // rather than left half-applied in ntdll.
+    const bool written = memcmp((void*)begin_write, new_data, HOOK_SIZE_WINE) == 0;
+    if (!written)
+    {
+        memcpy((void*)begin_write, old_data, HOOK_SIZE_WINE);
+    }
+
     VirtualProtect(reinterpret_cast<void*>(begin_write), HOOK_SIZE_WINE, OldProtection, &OldProtection);
+
+    if (!written)
+    {
+        ZLOG("installHook: wine patch did not verify, rolled back");
+    }
+    return written;
 }
 
 void wine_uninstallhook(__int64 kiuserexceptiondispatcher)
@@ -401,79 +473,122 @@ void wine_uninstallhook(__int64 kiuserexceptiondispatcher)
     auto begin_write = kiuserexceptiondispatcher + 0xB;
 
     auto OldProtection = 0ul;
-    VirtualProtect(reinterpret_cast<void*>(begin_write), HOOK_SIZE_WINE, PAGE_EXECUTE_READWRITE, &OldProtection);
+    if (!VirtualProtect(reinterpret_cast<void*>(begin_write), HOOK_SIZE_WINE, PAGE_EXECUTE_READWRITE, &OldProtection))
+    {
+        ++g_uninstallHookProtectFailures;
+        return;
+    }
+
     memcpy((void*)begin_write, old_data, HOOK_SIZE_WINE);
     VirtualProtect(reinterpret_cast<void*>(begin_write), HOOK_SIZE_WINE, OldProtection, &OldProtection);
 }
 
-void old_windows_installhook(void* func, __int64 kiuserexceptiondispatcher)
-{
-    // TODO
-}
-
-void old_windows_uninstallhook(__int64 kiuserexceptiondispatcher)
-{
-    // TODO
-}
-
-void InstallHook(void* func)
+// Returns whether the hook is verifiably in place. RunPatching stores that in
+// Protection::ExceptionHookInstalled, and install() arms the lobbymsgprints sentinel only if it is
+// set. The empty old_windows_* stubs were dropped: an unrecognised prologue now reports false.
+bool InstallHook(void* func)
 {
     auto kiuserexceptiondispatcher = (__int64)GetProcAddress(GetModuleHandleA("ntdll.dll"), "KiUserExceptionDispatcher");
+    g_kiUserExceptionDispatcher = kiuserexceptiondispatcher;
 
     if (kiuserexceptiondispatcher)
     {
+        ZLOG("installHook: dispatcher=%p prologue=%08X",
+            (void*)kiuserexceptiondispatcher, *(__int32*)kiuserexceptiondispatcher);
         if (*(__int32*)kiuserexceptiondispatcher == 0x58B48FC)
         {
-            auto distance = *(DWORD*)(kiuserexceptiondispatcher + 4);
+            // disp32 of a RIP-relative mov, so signed: read as DWORD it zero-extends, and a negative
+            // displacement would resolve about 4 GB too high.
+            auto distance = *(__int32*)(kiuserexceptiondispatcher + 4);
             auto ptr = (kiuserexceptiondispatcher + 8) + distance;
-            __fn_ptr_hook = ptr;
 
             auto OldProtection = 0ul;
-            VirtualProtect(reinterpret_cast<void*>(ptr), 8, PAGE_EXECUTE_READWRITE, &OldProtection);
+            if (!VirtualProtect(reinterpret_cast<void*>(ptr), 8, PAGE_EXECUTE_READWRITE, &OldProtection))
+            {
+                ZLOG("installHook: VirtualProtect failed for dispatch slot (err=%lu)", GetLastError());
+                return false;
+            }
+
+            // Recorded so UninstallHook can put back what was there. Upstream wrote __nullsub
+            // instead, which left ntdll calling into this module after it was gone.
+            g_exceptionDispatchOriginal = *reinterpret_cast<void**>(ptr);
             *reinterpret_cast<void**>(ptr) = func;
+            const bool applied = (*reinterpret_cast<void**>(ptr) == func);
             VirtualProtect(reinterpret_cast<void*>(ptr), 8, OldProtection, &OldProtection);
+
+            if (!applied)
+            {
+                g_exceptionDispatchOriginal = nullptr;
+                ZLOG("installHook: dispatch slot write did not verify");
+                return false;
+            }
+
+            g_exceptionDispatchSlot = ptr;
+            return true;
         }
         else if (*(__int32*)kiuserexceptiondispatcher == 0x248C8B48)
         {
-            wine_installhook(func, kiuserexceptiondispatcher);
-        }
-        else
-        {
-            old_windows_installhook(func, kiuserexceptiondispatcher);
+            ZLOG("installHook: wine path");
+
+            if (!wine_installhook(func, kiuserexceptiondispatcher))
+            {
+                return false;
+            }
+
+            wine_hook_installed = true;
+            return true;
         }
     }
+
+    ZLOG("installHook: unrecognised KiUserExceptionDispatcher, exception hook NOT installed");
+    return false;
 }
 
+// Runs from Unload() with every other thread suspended: no allocation, no logging.
 void UninstallHook()
 {
+    // Nothing to undo, and the INT3 below must not fire with no handler to catch it: it would be
+    // an unhandled breakpoint. Cleared here too, or the flag latches and the next exception of
+    // any kind has its Rip rewritten to ROP_RETN.
+    if (!g_exceptionDispatchSlot && !wine_hook_installed)
+    {
+        is_unhooking.store(false);
+        return;
+    }
+
     // unload current thread's dr7
     __int64 off = INT3_2_BO3;
     ((void(__fastcall*)())off)(); // force an exception to install the exception handler and setup debug registers
 
-    auto kiuserexceptiondispatcher = (__int64)GetProcAddress(GetModuleHandleA("ntdll.dll"), "KiUserExceptionDispatcher");
-
-    if (kiuserexceptiondispatcher)
+    // Restores from what InstallHook recorded rather than re-reading the prologue, so a dispatcher
+    // something else patched in between cannot make both branches skip while the hook stays live.
+    if (g_exceptionDispatchSlot)
     {
-        if (*(__int32*)kiuserexceptiondispatcher == 0x58B48FC)
+        auto ptr = g_exceptionDispatchSlot;
+        auto OldProtection = 0ul;
+        if (VirtualProtect(reinterpret_cast<void*>(ptr), 8, PAGE_EXECUTE_READWRITE, &OldProtection))
         {
-            if (__fn_ptr_hook)
-            {
-                auto ptr = __fn_ptr_hook;
-                auto OldProtection = 0ul;
-                VirtualProtect(reinterpret_cast<void*>(ptr), 8, PAGE_EXECUTE_READWRITE, &OldProtection);
-                *reinterpret_cast<void**>(ptr) = reinterpret_cast<void*>(__nullsub);
-                VirtualProtect(reinterpret_cast<void*>(ptr), 8, OldProtection, &OldProtection);
-            }
-        }
-        else if (*(__int32*)kiuserexceptiondispatcher == 0x248C8B48)
-        {
-            wine_uninstallhook(kiuserexceptiondispatcher);
+            *reinterpret_cast<void**>(ptr) = g_exceptionDispatchOriginal;
+            VirtualProtect(reinterpret_cast<void*>(ptr), 8, OldProtection, &OldProtection);
+            g_exceptionDispatchSlot = 0;
+            g_exceptionDispatchOriginal = nullptr;
         }
         else
         {
-            old_windows_uninstallhook(kiuserexceptiondispatcher);
+            ++g_uninstallHookProtectFailures;
         }
     }
+
+    if (wine_hook_installed && g_kiUserExceptionDispatcher)
+    {
+        wine_uninstallhook(g_kiUserExceptionDispatcher);
+        wine_hook_installed = false;
+    }
+
+    // Normally already cleared by ExceptHook when the INT3 above lands; unconditional so it cannot
+    // latch if that exception went somewhere else.
+    is_unhooking.store(false);
+    Protection::ExceptionHookInstalled = false;
 }
 
 // The three header fields a maintainer needs to recognise (or add) a build. EntryPoint is not one
@@ -558,14 +673,63 @@ static void ReportInstallFailure(bool supportedBuild, const std::string& reason)
     MessageBoxA(nullptr, message, "T7Patch", MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND);
 }
 
+// Latched once RunPatching gets past the steps that can fail cleanly, and never cleared: Unload()
+// removes the hooks but not everything install() did - it re-invokes a game function and shifts
+// the live password into the previous rotation slot - so a second install would not be a clean
+// one. Reload is refused rather than advertised. Upstream had no guard at all.
+bool g_patched = false;
+
+// Serialises RunPatching against Unload, so an Unload() landing mid-install cannot tear down
+// state that is still being built (uninstall() writing Old_lobbymsgprints while it is still 0).
+SRWLOCK g_lifecycleLock = SRWLOCK_INIT;
+
+struct LifecycleLock
+{
+    LifecycleLock() { AcquireSRWLockExclusive(&g_lifecycleLock); }
+    ~LifecycleLock() { ReleaseSRWLockExclusive(&g_lifecycleLock); }
+    LifecycleLock(const LifecycleLock&) = delete;
+    LifecycleLock& operator=(const LifecycleLock&) = delete;
+};
+
 void RunPatching()
 {
+    // Checked before the lock as well as after it. SRWLOCK is not recursive, so taking it first
+    // would turn a same-thread re-entry from a no-op into a permanent self-deadlock.
+    if (g_patched)
+    {
+        ZLOG("patch: already installed, refusing to reinstall (reload is not supported)");
+        return;
+    }
+
+    LifecycleLock lifecycle;
+
+    if (g_patched)
+    {
+        return;
+    }
+
     // Before anything that can fail or bail out below, so those diagnostics are written at all.
     zbr_enable_trace_from_config();
     ZLOG("patch: RunPatching %s", ZBR_VERSION_FULL);
 
 	// Set the process priority to above normal to help with performance
     SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+
+	// Initialize MinHook. Ahead of the Arxan step, where upstream had it after: a failure here now
+	// stops the install, and stopping before any game byte is written leaves nothing half-applied -
+	// in particular no Arxan patches without the config watcher that maintains them.
+    // ALREADY_INITIALIZED is not a failure: it is what a retry after a failed Arxan step sees.
+    const MH_STATUS initStatus = MH_Initialize();
+    if (initStatus != MH_OK && initStatus != MH_ERROR_ALREADY_INITIALIZED)
+    {
+        // Upstream logged nothing and carried on, which installs the exception hook, the memory
+        // patches and the lobbymsgprints sentinel while every MH_CreateHook below fails: a session
+        // that looks patched with none of the packet validation the detours provide. g_patched is
+        // not set, so this can be retried in-process.
+        ZLOG("hook: MH_Initialize FAILED (MH_STATUS=%d) - not installing", (int)initStatus);
+        OutputDebugStringA("T7 Patch: MinHook could not be initialised, patch not applied\n");
+        return;
+    }
 
     std::string arxanMessage;
     if (!arxan_bypass::install(arxanMessage))
@@ -578,14 +742,7 @@ void RunPatching()
     }
     ZLOG("arxan: %s", arxanMessage.c_str());
 
-	// Initialize MinHook
-    const MH_STATUS initStatus = MH_Initialize();
-    if (initStatus != MH_OK)
-    {
-        // Logged only; upstream carries on regardless and that is left as it was. Every hook
-        // below depends on this, so the "hook: FAILED" lines that follow are its consequence.
-        ZLOG("hook: MH_Initialize FAILED (MH_STATUS=%d)", (int)initStatus);
-    }
+    g_patched = true;
 
 	// Set a default player name if none is set
     if (!*Protection::CustomName) { snprintf(Protection::CustomName, 16, "Unknown Soldier"); }
@@ -603,8 +760,9 @@ void RunPatching()
 	// Apply Memory patches
 	hooks::ApplyMemoryPatches();
 
-	// Apply Exception Handler
-    InstallHook((void*)ExceptHook);
+	// Apply Exception Handler. install() reads the result: it arms a fault-driven sentinel that
+	// would be an unhandled crash on the first lobby message with no handler to catch it.
+    Protection::ExceptionHookInstalled = InstallHook((void*)ExceptHook);
 
 	// Install the protection hooks
     Protection::install();
@@ -617,6 +775,11 @@ EXPORT void EnableInjectorlessInstall() // must be called BEFORE loading the pat
 
 EXPORT void zbr_run_gamemode_lui(const char* input)
 {
+    // canon_hash walks the string unchecked; an exported entry point should not fault on null.
+    if (!input)
+    {
+        return;
+    }
 
     if (CONST32("serious_anticrash_2023") == GSCUHashing::canon_hash(input))
     {
@@ -627,75 +790,161 @@ EXPORT void zbr_run_gamemode_lui(const char* input)
 
 EXPORT void Unload()
 {
+    LifecycleLock lifecycle;
+
     // Everything below restores game memory and pointers that only exist once RunPatching got past
-    // the Arxan step: uninstall() writes Old_lobbymsgprints (still 0) over a live game pointer and
-    // UninstallHook() calls into a hardcoded game address. On an unsupported build those are not
-    // even the right addresses. With nothing installed there is nothing to undo.
-    if (!arxan_bypass::active())
+    // the Arxan step: UninstallHook() calls into a hardcoded game address, which on an unsupported
+    // build is not even the right one. With nothing installed there is nothing to undo. g_patched
+    // is only set under the lock above, so this also cannot see a half-finished install.
+    if (!g_patched)
     {
         ZLOG("unload: ignored - the patch is not installed");
         return;
     }
 
     ZLOG("unload: begin");
+    Protection::Unloading.store(true);
+
+    // Recorded explicitly so the resume below touches exactly the threads this suspended. Upstream
+    // walked a second, live snapshot to resume, which could resume threads it never suspended.
+    // Reserved up front so push_back cannot allocate once other threads are suspended - one of
+    // them may hold the process heap lock.
+    std::vector<DWORD> suspendedThreadIds;
+    suspendedThreadIds.reserve(1024);
+
+    // Counted, not logged: everything from here to the resume runs with other threads suspended,
+    // and the trace log takes a lock (and allocates) one of them may hold.
+    unsigned int getContextFailures = 0;
+    unsigned int setContextFailures = 0;
+
     HANDLE hThreadSnap = INVALID_HANDLE_VALUE;
-    THREADENTRY32 te32;
-
-    hThreadSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    te32.dwSize = sizeof(THREADENTRY32);
-
-    if (Thread32First(hThreadSnap, &te32))
+    for (int attempt = 0; attempt < 3 && hThreadSnap == INVALID_HANDLE_VALUE; ++attempt)
     {
-        do
-        {
-            if (te32.th32OwnerProcessID == GetCurrentProcessId() && te32.th32ThreadID != GetCurrentThreadId())
-            {
-                auto hThread = OpenThread(THREAD_ALL_ACCESS, false, te32.th32ThreadID);
-
-                if (hThread)
-                {
-                    SuspendThread(hThread);
-                    CONTEXT tContext{};
-                    tContext.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-                    if (GetThreadContext(hThread, &tContext))
-                    {
-                        tContext.Dr7 = 0;
-                        tContext.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-                        SetThreadContext(hThread, &tContext);
-                    }
-                    CloseHandle(hThread);
-                }
-            }
-        } while (Thread32Next(hThreadSnap, &te32));
+        hThreadSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     }
 
-    CloseHandle(hThreadSnap);
+    if (hThreadSnap == INVALID_HANDLE_VALUE)
+    {
+        ZLOG("unload: CreateToolhelp32Snapshot FAILED (err=%lu) - tearing down with threads running", GetLastError());
+    }
+    else
+    {
+        THREADENTRY32 te32{};
+        te32.dwSize = sizeof(THREADENTRY32);
+
+        if (!Thread32First(hThreadSnap, &te32))
+        {
+            ZLOG("unload: Thread32First FAILED (err=%lu) - tearing down with threads running", GetLastError());
+        }
+        else
+        {
+            do
+            {
+                if (te32.th32OwnerProcessID == GetCurrentProcessId() && te32.th32ThreadID != GetCurrentThreadId())
+                {
+                    auto hThread = OpenThread(THREAD_ALL_ACCESS, false, te32.th32ThreadID);
+
+                    if (hThread)
+                    {
+                        // Dr7 only where the suspend took: SetThreadContext on a running thread
+                        // races whatever it is doing.
+                        if (SuspendThread(hThread) != (DWORD)-1)
+                        {
+                            CONTEXT tContext{};
+                            tContext.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+                            if (!GetThreadContext(hThread, &tContext))
+                            {
+                                ++getContextFailures;
+                            }
+                            else
+                            {
+                                tContext.Dr7 = 0;
+                                tContext.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+                                if (!SetThreadContext(hThread, &tContext))
+                                {
+                                    ++setContextFailures;
+                                }
+                            }
+
+                            // Past the reserve, Dr7 is still cleared - the half that matters, since a
+                            // thread left with debug registers armed into this module faults once
+                            // it is gone - but the thread is let go now rather than reallocating.
+                            if (suspendedThreadIds.size() < suspendedThreadIds.capacity())
+                            {
+                                suspendedThreadIds.push_back(te32.th32ThreadID);
+                            }
+                            else
+                            {
+                                ResumeThread(hThread);
+                            }
+                        }
+                        CloseHandle(hThread);
+                    }
+                }
+            } while (Thread32Next(hThreadSnap, &te32));
+        }
+
+        CloseHandle(hThreadSnap);
+    }
 
     Protection::uninstall();
-    is_unhooking = true;
+    hooks::RemoveVMTHooks();
+    is_unhooking.store(true);
     UninstallHook();
 
-    hThreadSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    te32.dwSize = sizeof(THREADENTRY32);
-
-    if (Thread32First(hThreadSnap, &te32))
+    for (auto threadId : suspendedThreadIds)
     {
-        do
-        {
-            if (te32.th32OwnerProcessID == GetCurrentProcessId() && te32.th32ThreadID != GetCurrentThreadId())
-            {
-                auto hThread = OpenThread(THREAD_ALL_ACCESS, false, te32.th32ThreadID);
+        auto hThread = OpenThread(THREAD_ALL_ACCESS, false, threadId);
 
-                if (hThread)
-                {
-                    ResumeThread(hThread);
-                    CloseHandle(hThread);
-                }
-            }
-        } while (Thread32Next(hThreadSnap, &te32));
+        if (hThread)
+        {
+            ResumeThread(hThread);
+            CloseHandle(hThread);
+        }
     }
 
-    CloseHandle(hThreadSnap);
+    // Safe to log again: every thread the loop above suspended has been resumed.
+    if (getContextFailures || setContextFailures)
+    {
+        ZLOG("unload: Dr7 left armed on %u thread(s) (GetThreadContext failed %u, SetThreadContext failed %u)",
+            getContextFailures + setContextFailures, getContextFailures, setContextFailures);
+    }
+    if (g_uninstallHookProtectFailures)
+    {
+        ZLOG("unload: VirtualProtect failed restoring the exception dispatcher (%u) - ntdll may still call into this module",
+            g_uninstallHookProtectFailures);
+    }
+    if (Protection::UninstallIatRestoreFailures)
+    {
+        ZLOG("unload: FAILED to restore the IsProcessorFeaturePresent IAT entry");
+    }
+    if (Protection::UninstallVtableProtectFailures)
+    {
+        ZLOG("unload: VirtualProtect failed for %u Steam vtable slot(s), still pointing into this module",
+            Protection::UninstallVtableProtectFailures);
+    }
+
+    // Wait for the config watcher to leave the module. Bounded: it stays until arxan_bypass::maintain
+    // has done its one re-apply (see MainThread), and that waits on a game signal this cannot hurry.
+    // If it is still running the handle is kept and the module must not be freed.
+    if (Protection::MainThreadHandle)
+    {
+        if (WaitForSingleObject(Protection::MainThreadHandle, 5000) == WAIT_OBJECT_0)
+        {
+            CloseHandle(Protection::MainThreadHandle);
+            Protection::MainThreadHandle = nullptr;
+        }
+        else
+        {
+            ZLOG("unload: config watcher still running (Arxan maintenance pending) - do not FreeLibrary this module");
+        }
+    }
+
+    // After the resume, not before: MH_DisableHook allocates and suspends threads itself, so running
+    // it while every other thread is suspended can deadlock on the process heap lock. Upstream's
+    // Unload never disabled the detours at all.
+    hooks::DestroyHooks();
+    ZLOG("unload: done");
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule,
