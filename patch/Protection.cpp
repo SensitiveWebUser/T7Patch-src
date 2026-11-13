@@ -526,7 +526,22 @@ __int32 Protection::GetLobbyChatEntry(INT64 api, INT64 csteamidlobby, INT64 chat
         {
             limit = (size_t)cubdata;
         }
-        const int msgLen = (int)strnlen(msg, limit);
+        int msgLen = (int)strnlen(msg, limit);
+        // No NUL inside what Steam wrote: terminate it ourselves, or the game would read on into
+        // stale bytes this loop never sanitised. Drops the last byte only when the payload filled
+        // the whole buffer.
+        if ((size_t)msgLen == limit && limit > 0)
+        {
+            if (limit < (size_t)cubdata)
+            {
+                msg[limit] = '\0';
+            }
+            else
+            {
+                msg[limit - 1] = '\0';
+                msgLen = (int)(limit - 1);
+            }
+        }
 
         for (int i = 0; i < msgLen; i++)
         {
