@@ -380,6 +380,7 @@ namespace lua_symbols
             return databases;
         }
 
+#ifdef _MSC_VER
         bool TryGetLivePrototype(std::int64_t* luaState, void* debugRecord,
             std::uint32_t& functionHash, std::uintptr_t& instructions)
         {
@@ -463,6 +464,88 @@ namespace lua_symbols
                 return false;
             }
         }
+#else
+        // mingw (the dev/build and CI test build) has no __try/__except, so the same reads, in the
+        // same order and with the same checks, go through ReadProcessMemory on our own process:
+        // it reports an unreadable address as a failed call instead of faulting, which is exactly
+        // what the MSVC __except branch turns a fault into. MSVC, the shipping build, keeps
+        // upstream's SEH version above unchanged.
+        template <typename T>
+        bool ProbeRead(std::uintptr_t address, T& out)
+        {
+            SIZE_T read = 0;
+            return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(address),
+                       &out, sizeof(T), &read) && read == sizeof(T);
+        }
+
+        bool TryGetLivePrototype(std::int64_t* luaState, void* debugRecord,
+            std::uint32_t& functionHash, std::uintptr_t& instructions)
+        {
+            if (!luaState || !debugRecord)
+                return false;
+
+            const auto state = reinterpret_cast<std::uintptr_t>(luaState);
+            const auto debug = reinterpret_cast<std::uintptr_t>(debugRecord);
+            std::uintptr_t records = 0, current = 0;
+            std::int32_t level = 0, isTailCall = 0;
+            if (!ProbeRead(state + 0x18, records) || !ProbeRead(state + 0x28, current) ||
+                !ProbeRead(debug + 0x240, level) || !ProbeRead(debug + 0x244, isTailCall))
+                return false;
+
+            if (!records || current < records || level < 0 || isTailCall)
+                return false;
+
+            const auto callStackBytes = current - records;
+            if (callStackBytes % 24 != 0)
+                return false;
+
+            const auto currentLevel = callStackBytes / 24;
+            if (currentLevel > 4096 || static_cast<std::uintptr_t>(level) > currentLevel)
+                return false;
+
+            std::uintptr_t functionBase = 0;
+            if (!ProbeRead(static_cast<std::uintptr_t>(level) == currentLevel ?
+                    state + 0x50 :
+                    records + 24 * (static_cast<std::uintptr_t>(level) + 1),
+                    functionBase))
+                return false;
+            if (functionBase < HksObjectSize)
+                return false;
+
+            std::uintptr_t typeBits = 0;
+            if (!ProbeRead(functionBase - HksObjectSize, typeBits) || (typeBits & 0xF) != 9)
+                return false;
+
+            std::uintptr_t closure = 0;
+            if (!ProbeRead(functionBase - sizeof(std::uintptr_t), closure) || !closure)
+                return false;
+
+            std::uintptr_t method = 0;
+            if (!ProbeRead(closure + 0x10, method) || !method)
+                return false;
+
+            std::uint32_t instructionCount = 0, hash = 0;
+            std::uintptr_t instructionData = 0;
+            if (!ProbeRead(method + 0x20, instructionCount) ||
+                !ProbeRead(method + 0x28, instructionData) || !ProbeRead(method + 0x10, hash))
+                return false;
+            if (!hash || !instructionData || instructionCount == 0 ||
+                instructionCount > MaximumDatabaseEntries)
+            {
+                return false;
+            }
+
+            functionHash = hash;
+            instructions = instructionData;
+            return true;
+        }
+
+        bool HasLuaBytecodeHeader(std::uintptr_t address)
+        {
+            std::uint32_t magic = 0;
+            return address != 0 && ProbeRead(address, magic) && magic == 0x61754C1B;
+        }
+#endif
 
         const char* ResolveLiveFunctionName(std::uint32_t functionHash,
             std::uintptr_t instructions)
